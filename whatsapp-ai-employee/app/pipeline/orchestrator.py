@@ -25,11 +25,12 @@ from app.core.logging import get_logger
 from app.core.metrics import PipelineMetrics
 from app.db.models import Conversation, Customer, Tenant, UsageLog
 from app.modules import catalog_qa, consultation, escalation, order_capture, order_status
-from app.pipeline import guardrails, router
+from app.pipeline import fast_intent, guardrails, router
 from app.pipeline.normalize import (
     is_meaningless,
     local_rewrite,
     looks_like_followup,
+    looks_like_topic_change,
     normalize,
 )
 from app.pipeline.smalltalk import canned_reply, detect_smalltalk
@@ -77,6 +78,7 @@ async def process_message(
     *,
     raw_message: str,
     has_media: bool = False,
+    entry_context: dict | None = None,
 ) -> Outcome:
     metrics = PipelineMetrics()
     outcome = Outcome(metrics=metrics)
@@ -177,9 +179,58 @@ async def process_message(
         metrics.mark("rewritten", True)
 
     state = dict(conversation.state or {})
+    active_flow = state.get("flow")
 
-    # --- steps 6-8: route, then dispatch ---
-    if tenant.is_pro:
+    # --- step 6: keyword fast path, BEFORE any model call ---
+    # Skipped mid-flow: a message during order capture is an answer to our last
+    # question, not a new query to look up.
+    if not active_flow:
+        t0 = time.perf_counter()
+        fast = await catalog_qa.try_fast_path(
+            db, tenant, normalized=normalized, search_query=search_query, metrics=metrics
+        )
+        metrics.record("fast_path", t0)
+        if fast and fast.answer:
+            outcome.reply = fast.answer
+            outcome.intent = "catalog_qa"
+            outcome.handled_by = fast.handled_by
+            if fast.cacheable:
+                await redis_service.set_answer(cache_key, fast.answer)
+            await redis_service.add_history(
+                str(conversation.id), raw_message, outcome.reply
+            )
+            return outcome
+
+    # --- steps 7-8: route, then dispatch ---
+    router_degraded = False
+
+    # Mid-flow shortcut: while collecting order details, an incoming message is
+    # almost always the answer to the question we just asked. Routing it costs a
+    # model call per slot (six per order) for no benefit, so skip the router
+    # unless the message looks like the customer changed the subject.
+    skip_router = (
+        active_flow == "order"
+        and state.get("awaiting")
+        and not looks_like_topic_change(normalized)
+    )
+    # Confidence gate: a deterministic classifier handles the unmistakable
+    # messages for free, and the LLM router is called only when this returns
+    # None. High precision by design — see fast_intent's contract.
+    fast = fast_intent.classify(
+        normalized, raw_message, state=state, entry_context=entry_context or {}
+    )
+
+    if skip_router:
+        metrics.mark("router_skipped", "mid_flow_slot_answer")
+        intent = "order_capture"
+        confidence = 1.0
+        slots = {}
+    elif fast:
+        metrics.mark("router_skipped", fast.reason)
+        intent = fast.intent
+        confidence = fast.confidence
+        slots = fast.slots
+    elif tenant.is_pro:
         t0 = time.perf_counter()
         decision = await router.route(
             raw_message,
@@ -188,33 +239,42 @@ async def process_message(
             profile=customer.profile or {},
         )
         metrics.record("router", t0)
-        if decision.usage:
+        if decision.usage and (
+            decision.usage.input_tokens or decision.usage.output_tokens
+        ):
             metrics.add_usage(decision.usage.input_tokens, decision.usage.output_tokens)
-        intent = decision.intent
-        confidence = decision.confidence
-        slots = decision.slots
+
+        if decision.failed:
+            # Quota exhausted or unparseable response. Fall back to keyword
+            # routing so the customer still gets served — escalating every
+            # message because our provider hiccupped is the wrong failure mode.
+            router_degraded = True
+            intent = heuristic_route(normalized, state)
+            confidence = 1.0
+            slots = {}
+            metrics.mark(
+                "router_degraded",
+                "rate_limited" if decision.rate_limited else "unparseable",
+            )
+        else:
+            intent = decision.intent
+            confidence = decision.confidence
+            slots = decision.slots
     else:
         intent = heuristic_route(normalized, state)
         confidence = 1.0
         slots = {}
 
+    # Genuinely ambiguous: try grounded retrieval before giving up. If the
+    # tenant's own data has no answer, catalog_qa escalates from there.
+    if confidence < LOW_CONFIDENCE_THRESHOLD and active_flow != "order":
+        metrics.mark("low_confidence_fallthrough", intent)
+        intent = "catalog_qa"
+
     metrics.mark("intent", intent)
     metrics.mark("confidence", confidence)
+    metrics.mark("degraded", router_degraded)
     outcome.intent = intent
-
-    # Ambiguous message: Pro would still guess, so we escalate instead of
-    # inventing an answer.
-    if confidence < LOW_CONFIDENCE_THRESHOLD and state.get("flow") != "order":
-        metrics.mark("path", "low_confidence_escalation")
-        outcome.reply = await escalation.raise_escalation(
-            db, tenant, conversation,
-            reason="low_confidence",
-            detail=raw_message,
-            customer_wa_id=customer.wa_id,
-        )
-        outcome.escalated = True
-        outcome.handled_by = "low_confidence"
-        return outcome
 
     state_update: dict = {}
     profile_update: dict = {}

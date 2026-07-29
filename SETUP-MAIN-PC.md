@@ -262,6 +262,9 @@ After `down -v` you must re-run `seed_demo`.
 | Messages arrive but bot never replies | `unknown_tenant` in the logs → the seeded tenant's `whatsapp_phone_number_id` doesn't match your current `.env`. Re-run `seed_demo`. |
 | `port is already allocated` (5432 / 6379 / 8000) | You already run Postgres/Redis/something on that port. Stop it, or change the left-hand side of the port mapping in `docker-compose.yml` (e.g. `"5433:5432"`). |
 | Bot replies "Let me check that with our team" to everything | Either `GEMINI_API_KEY` is missing (check `verify_credentials`) or nothing was seeded (`seed_demo`). |
+| `429 RESOURCE_EXHAUSTED` / `quotaValue: 5` | Gemini **free tier allows 5 requests per minute**. The scripted sim now paces itself (`--delay 13`). To run at full speed, enable billing on the Google Cloud project behind the key, then use `--delay 0.2`. |
+| `empty_llm_response` with `finish_reason: MAX_TOKENS` | A thinking model (gemini-2.5+/3.x) spent its whole output budget reasoning and emitted no text. Already mitigated by `GEMINI_DISABLE_THINKING=true` and larger caps; if it recurs, raise `ROUTER_MAX_OUTPUT_TOKENS`. |
+| Every message shows `intent=other` and escalates | Same root cause as above — the router got an empty response. Check the logs for `empty_llm_response` or `router_unparseable`. |
 | Everything worked yesterday, dead today | The WhatsApp token was temporary. See error 190 above. |
 
 ---

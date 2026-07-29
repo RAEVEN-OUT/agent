@@ -82,6 +82,36 @@ def looks_like_followup(normalized: str) -> bool:
     return normalized.startswith(FOLLOWUP_PREFIXES)
 
 
+TOPIC_CHANGE_MARKERS = (
+    "?", "actually", "wait", "instead", "cancel", "forget", "nevermind",
+    "never mind", "change", "how much", "price", "what about", "do you have",
+    "which", "another", "different", "hold on", "stop",
+)
+
+QUESTION_WORDS = ("what", "which", "how", "why", "when", "where", "can you", "do you")
+
+
+def looks_like_topic_change(normalized: str) -> bool:
+    """Is this message a new question rather than an answer to ours?
+
+    Used mid-flow (during order capture) to decide whether we can skip the LLM
+    router entirely. A bare "641002" or "Aparna" is an answer; "actually how
+    much is the 200ml?" is not.
+
+    Deliberately biased toward returning True: a false positive costs one model
+    call, a false negative shoves a real question into an address field.
+    """
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in TOPIC_CHANGE_MARKERS):
+        return True
+    if normalized.startswith(QUESTION_WORDS):
+        return True
+    # Long free text mid-flow is usually an address, so length alone is not a
+    # signal — only the markers above are.
+    return False
+
+
 def local_rewrite(normalized: str, last_topic: str) -> str:
     """Zero-cost follow-up resolution.
 

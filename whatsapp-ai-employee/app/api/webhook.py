@@ -114,6 +114,44 @@ def _extract_text(message: dict) -> tuple[str, str, str | None]:
     return "", msg_type, None
 
 
+def _entry_context(message: dict) -> dict:
+    """Extract where this customer came from.
+
+    Messages that originate from an ad that clicks to WhatsApp (or a Facebook
+    page CTA) carry a `referral` object. If the ad or post is product-specific,
+    its identifiers tell us what the customer is asking about before they say a
+    word — the highest-converting, zero-inference entry point there is.
+
+    Parsed defensively: field names vary and Meta adds to them over time, so we
+    take what is present and ignore the rest.
+    """
+    referral = message.get("referral") or {}
+    if not referral:
+        return {}
+
+    context = {
+        "source_type": referral.get("source_type"),
+        "source_id": referral.get("source_id"),
+        "source_url": referral.get("source_url"),
+        "headline": referral.get("headline"),
+        "ctwa_clid": referral.get("ctwa_clid"),
+    }
+
+    # Encode the SKU in the ad's headline/body or landing URL (e.g.
+    # ...?sku=ARG-OIL-100) and it lands here as a resolved product.
+    from app.pipeline.fast_intent import extract_sku
+
+    haystack = " ".join(
+        str(v) for v in (referral.get("headline"), referral.get("body"),
+                         referral.get("source_url")) if v
+    )
+    sku = extract_sku(haystack)
+    if sku:
+        context["sku"] = sku
+
+    return {k: v for k, v in context.items() if v}
+
+
 async def _handle_message(
     phone_number_id: str | None, message: dict, profile_name: str | None
 ) -> None:
@@ -176,6 +214,7 @@ async def _handle_message(
             conversation,
             raw_message=text,
             has_media=media_id is not None,
+            entry_context=_entry_context(message),
         )
 
         log.info(

@@ -77,6 +77,44 @@ number banned.
 
 ---
 
+## Cost & accuracy tooling
+
+```bash
+# measure accuracy + free-path rate against the golden set
+docker compose exec api python -m scripts.eval_harness
+docker compose exec api python -m scripts.eval_harness --plan basic
+docker compose exec api python -m scripts.eval_harness --delay 13   # free Gemini key
+
+# calibrate the fast-path threshold (no LLM calls)
+docker compose exec api python -m scripts.tune_retrieval
+docker compose exec api python -m scripts.tune_retrieval --semantic
+```
+
+Run `eval_harness` before and after any change to a threshold, prompt, or model.
+It prints accuracy, what fraction of messages cost nothing, and the projected
+monthly cost. `tests/golden_set.json` is where every message the bot gets wrong
+in the real world should be added — that file is the only thing standing between
+"optimised" and "quietly degraded".
+
+## Zero-AI entry points (the highest-converting path)
+
+A customer who taps a product button, scans a QR on the packaging, or clicks an
+ad already told you what they want. Encode the SKU in the link:
+
+```
+https://wa.me/<number>?text=PRODUCT%3A%20ARG-OIL-100
+https://wa.me/<number>?text=%23ROSE-SHM-200
+```
+
+`fast_intent` reads that on the first message and jumps straight into order
+capture — no routing, no inference, no model call. Messages arriving from an ad
+that clicks to WhatsApp carry a `referral` payload, which `_entry_context` in
+`webhook.py` parses for the same purpose.
+
+From there the whole flow is deterministic: collect details → summary with total
+and delivery date → confirm → order created. A single-product seller can run
+end-to-end with **zero LLM calls**.
+
 ## How a message flows
 
 ```
@@ -91,13 +129,20 @@ inbound webhook
        3. small talk (canned)                 zero cost
        4. answer cache (facts only)           zero cost
        5. local follow-up rewrite             zero cost
-       6. keyword search (Postgres FTS)       ~ms, no API call
-       7. embeddings + Qdrant                 cheap, cached 7d
-       8. LLM route + compose                 last resort
+       6. keyword FAQ fast path (Postgres FTS) ~ms, no API call
+       7. deterministic intent gate            zero cost  <- fast_intent
+       8. embeddings + Qdrant                  cheap, cached 7d
+       9. LLM route + compose                  last resort
 ```
 
-Returns at the first step that can answer confidently. Most messages never
-reach step 8.
+Returns at the first step that can answer confidently. On the golden set, 63% of
+messages are resolved before the LLM router is even consulted — higher in
+practice, since that measurement excludes the DB-backed FAQ fast path.
+
+Step 7 (`fast_intent`) is a **confidence gate**, not a replacement router. Its
+contract is high precision, low recall: returning `None` is free because the LLM
+router picks it up, but a confident wrong answer sends the customer down the
+wrong flow. Anything advisory is refused outright.
 
 ### The tier rule
 

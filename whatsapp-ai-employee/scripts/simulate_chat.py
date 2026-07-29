@@ -114,6 +114,16 @@ async def main() -> None:
     parser.add_argument("--plan", choices=["basic", "pro"], default="pro")
     parser.add_argument("--script", action="store_true", help="run the scripted scenario")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=13.0,
+        help=(
+            "seconds between scripted messages. Gemini's free tier allows only "
+            "5 requests/minute, so keep this at 13+ on a free key. Set 0.2 once "
+            "billing is enabled."
+        ),
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -124,9 +134,15 @@ async def main() -> None:
         print("=" * 60)
 
         if args.script:
+            if args.delay >= 5:
+                print(
+                    f"(pacing {args.delay:.0f}s between messages for free-tier "
+                    f"quota — ~{len(SCRIPT) * args.delay / 60:.0f} min total. "
+                    "Use --delay 0.2 if billing is enabled.)\n"
+                )
             for line in SCRIPT:
                 await send(db, tenant, customer, conversation, line, args.verbose)
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(args.delay)
             print("\n" + "=" * 60)
             print(f"conversation state: {conversation.state}")
             print(f"customer profile:   {customer.profile}")

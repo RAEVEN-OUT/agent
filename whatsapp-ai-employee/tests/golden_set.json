@@ -1,0 +1,205 @@
+{
+  "_comment": [
+    "Golden evaluation set. Each case is a real-shaped customer message with the",
+    "behaviour we expect. Run with: python -m scripts.eval_harness",
+    "",
+    "Fields:",
+    "  message        what the customer types",
+    "  expect_intent  the intent that should be chosen (null = don't care)",
+    "  expect_route   'free' = must cost 0 LLM calls | 'llm' = a model call is",
+    "                 justified | 'either' = don't care",
+    "  must_contain   substrings the reply must include (facts, not phrasing)",
+    "  must_not       substrings that must never appear",
+    "  expect_escalate true if a human must take over",
+    "",
+    "Add every message a real customer sends that the bot gets wrong. This file",
+    "is how you tell whether a threshold change improved or quietly broke things."
+  ],
+
+  "cases": [
+    {
+      "id": "greeting",
+      "message": "hi",
+      "expect_intent": "greeting",
+      "expect_route": "free",
+      "must_contain": []
+    },
+    {
+      "id": "thanks",
+      "message": "thank you so much",
+      "expect_intent": "thanks",
+      "expect_route": "free"
+    },
+    {
+      "id": "price_known_product",
+      "message": "how much is the argan oil",
+      "expect_intent": "catalog_qa",
+      "expect_route": "either",
+      "must_contain": ["449"],
+      "must_not": ["cure", "regrow", "guarantee"]
+    },
+    {
+      "id": "price_larger_size",
+      "message": "how much for the 200ml argan oil",
+      "expect_intent": "catalog_qa",
+      "expect_route": "either",
+      "must_contain": ["799"]
+    },
+    {
+      "id": "delivery_charges",
+      "message": "what are the delivery charges",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["599"]
+    },
+    {
+      "id": "delivery_charges_paraphrase",
+      "message": "how much is shipping",
+      "expect_intent": "catalog_qa",
+      "expect_route": "either",
+      "must_contain": ["599"]
+    },
+    {
+      "id": "delivery_time",
+      "message": "how long does delivery take",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["working days"]
+    },
+    {
+      "id": "cod_available",
+      "message": "is cash on delivery available",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["2000"]
+    },
+    {
+      "id": "return_policy",
+      "message": "what is your return policy",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["7 days"]
+    },
+    {
+      "id": "vegan",
+      "message": "are your products vegan",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["vegan"]
+    },
+    {
+      "id": "sulphate_free",
+      "message": "is it sulphate free",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["sulphate"]
+    },
+    {
+      "id": "working_hours",
+      "message": "what are your working hours",
+      "expect_intent": "catalog_qa",
+      "expect_route": "free",
+      "must_contain": ["10am"]
+    },
+    {
+      "id": "stock_check",
+      "message": "is the tea tree shampoo available",
+      "expect_intent": "catalog_qa",
+      "expect_route": "either",
+      "must_contain": ["stock"]
+    },
+    {
+      "id": "out_of_stock_item",
+      "message": "how much is the silk finish serum",
+      "expect_intent": "catalog_qa",
+      "expect_route": "either",
+      "must_contain": ["out of stock"]
+    },
+    {
+      "id": "advisory_dandruff",
+      "message": "which shampoo is good for dandruff",
+      "expect_intent": "consultation",
+      "expect_route": "llm",
+      "must_not": ["cure", "treats", "regrow", "guarantee"]
+    },
+    {
+      "id": "advisory_open_ended",
+      "message": "my hair keeps breaking, what should i use",
+      "expect_intent": "consultation",
+      "expect_route": "llm",
+      "must_not": ["cure", "regrow"]
+    },
+    {
+      "id": "order_intent",
+      "message": "i want to order the tea tree shampoo",
+      "expect_intent": "order_capture",
+      "expect_route": "free"
+    },
+    {
+      "id": "order_status",
+      "message": "where is my order",
+      "expect_intent": "order_status",
+      "expect_route": "free"
+    },
+    {
+      "id": "order_status_paraphrase",
+      "message": "has my parcel shipped yet",
+      "expect_intent": "order_status",
+      "expect_route": "free"
+    },
+    {
+      "id": "deep_link_sku",
+      "message": "PRODUCT: ROSE-SHM-200",
+      "expect_intent": "order_capture",
+      "expect_route": "free"
+    },
+    {
+      "id": "human_request",
+      "message": "i want to talk to a human",
+      "expect_intent": "human_request",
+      "expect_route": "free",
+      "expect_escalate": true
+    },
+    {
+      "id": "adverse_reaction",
+      "message": "my scalp is burning after using the oil",
+      "expect_intent": "adverse_reaction",
+      "expect_route": "free",
+      "expect_escalate": true,
+      "must_contain": ["stop using"]
+    },
+    {
+      "id": "medical_question",
+      "message": "will this help with alopecia",
+      "expect_intent": "medical",
+      "expect_route": "free",
+      "expect_escalate": true,
+      "must_not": ["yes", "cure", "treats"]
+    },
+    {
+      "id": "pregnancy_safety",
+      "message": "is it safe while pregnant",
+      "expect_intent": "medical",
+      "expect_route": "free",
+      "expect_escalate": true,
+      "must_not": ["yes it is safe"]
+    },
+    {
+      "id": "complaint",
+      "message": "i still not received my order this is a scam",
+      "expect_intent": "complaint",
+      "expect_route": "free",
+      "expect_escalate": true
+    },
+    {
+      "id": "gibberish",
+      "message": "aaaaaaa",
+      "expect_route": "free"
+    },
+    {
+      "id": "emoji_only",
+      "message": "👍",
+      "expect_route": "free"
+    }
+  ]
+}

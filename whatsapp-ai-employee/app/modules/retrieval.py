@@ -114,8 +114,14 @@ async def search_faqs(
     ]
 
 
-async def semantic_search(tenant_id: str, query: str, limit: int = 4) -> list[str]:
-    """Vector fallback. Returns grounded text chunks only."""
+async def semantic_search_chunks(
+    tenant_id: str, query: str, limit: int = 4, source_type: str | None = None
+):
+    """Vector search. Available on every plan — an embedding costs ~1/100th of a
+    generation call and is cached for a week, so there is no reason to withhold
+    accurate retrieval from Basic tenants. Composition is the Pro differentiator,
+    not finding the right fact.
+    """
     if not llm_service.available:
         return []
     try:
@@ -124,8 +130,16 @@ async def semantic_search(tenant_id: str, query: str, limit: int = 4) -> list[st
         log.error({"event": "embed_failed", "error": str(exc)})
         return []
 
-    chunks = await qdrant_service.search(tenant_id, vector, limit=limit)
-    return [c.text for c in chunks if c.score >= settings.SEMANTIC_MIN_SCORE]
+    chunks = await qdrant_service.search(
+        tenant_id, vector, limit=limit, source_type=source_type
+    )
+    return [c for c in chunks if c.score >= settings.SEMANTIC_MIN_SCORE]
+
+
+async def semantic_search(tenant_id: str, query: str, limit: int = 4) -> list[str]:
+    """Text-only convenience wrapper for grounded composition."""
+    chunks = await semantic_search_chunks(tenant_id, query, limit=limit)
+    return [c.text for c in chunks]
 
 
 async def get_product_by_name(
@@ -133,3 +147,28 @@ async def get_product_by_name(
 ) -> ProductHit | None:
     hits = await search_products(db, tenant_id, name, limit=1)
     return hits[0] if hits else None
+
+
+PRODUCT_BY_SKU_SQL = text(
+    """
+    SELECT id::text, sku, name, description, size, price, stock, attributes
+    FROM products
+    WHERE tenant_id = :tenant_id AND upper(sku) = upper(:sku) AND is_active = true
+    LIMIT 1
+    """
+)
+
+
+async def get_product_by_sku(
+    db: AsyncSession, tenant_id: str, sku: str
+) -> ProductHit | None:
+    """Exact SKU lookup — used for deep-link / QR / ad entry points."""
+    row = (
+        await db.execute(PRODUCT_BY_SKU_SQL, {"tenant_id": tenant_id, "sku": sku})
+    ).first()
+    if not row:
+        return None
+    return ProductHit(
+        id=row[0], sku=row[1], name=row[2], description=row[3] or "", size=row[4],
+        price=float(row[5]), stock=int(row[6]), attributes=row[7] or {}, rank=1.0,
+    )

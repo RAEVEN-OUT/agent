@@ -19,9 +19,14 @@ from app.core.logging import get_logger
 from app.db.models import Tenant
 from app.modules import retrieval
 from app.pipeline.guardrails import CLAIMS_SYSTEM_RULES, sanitize_outbound
+from app.pipeline.text_signals import is_advisory, is_factual
 from app.services.llm_service import llm_service
 
 log = get_logger("catalog_qa")
+
+# Re-exported for backwards compatibility; the definitions live in text_signals
+# so the deterministic classifier can use them without importing this module.
+__all__ = ["handle", "try_fast_path", "is_advisory", "is_factual", "QAResult"]
 
 
 @dataclass
@@ -34,27 +39,22 @@ class QAResult:
     output_tokens: int = 0
 
 
-# Questions that are pure fact lookups — safe to cache and to answer from a
-# template even on Pro, because there is no selling decision involved.
-FACTUAL_MARKERS = (
-    "delivery charge", "shipping charge", "do you ship", "return policy",
-    "exchange policy", "how many days", "timing", "open", "cod available",
-    "cash on delivery available", "gst", "invoice",
-)
-
-# Never fast-path these: they are the conversations where advice earns money.
-ADVISORY_MARKERS = (
-    "which", "better", "best", "suggest", "recommend", "should i", "suitable",
-    "good for", "vs", "or ", "compare", "difference between", "help me choose",
-)
+DEFAULT_CTA = "Would you like to place an order?"
 
 
-def is_advisory(normalized: str) -> bool:
-    return any(m in normalized for m in ADVISORY_MARKERS)
+def append_cta(answer: str, cta: str | None = None) -> str:
+    """Every terminal reply should carry exactly one forward action.
 
-
-def is_factual(normalized: str) -> bool:
-    return any(m in normalized for m in FACTUAL_MARKERS)
+    A bot that only answers ends conversations; a bot that answers and then
+    advances closes sales. This is deterministic and free, so even zero-cost
+    fast-path answers keep the sales motion instead of dead-ending.
+    """
+    if not answer:
+        return answer
+    text = answer.rstrip()
+    if text.endswith("?"):  # already ends in a question — don't stack two
+        return text
+    return f"{text}\n\n{cta or DEFAULT_CTA}"
 
 
 def _templated_product_reply(
@@ -75,6 +75,45 @@ def _templated_product_reply(
 
     lines = [h.as_line(currency) for h in hits[:4]]
     return "Here is what we have:\n" + "\n".join(f"• {line}" for line in lines)
+
+
+async def try_fast_path(
+    db: AsyncSession,
+    tenant: Tenant,
+    *,
+    normalized: str,
+    search_query: str,
+    metrics,
+) -> QAResult | None:
+    """Zero-LLM attempt, run BEFORE the router.
+
+    This is the whole point of the cascade: a question like "what are the
+    delivery charges" must never cost a model call. Routing first would defeat
+    that, so this probe happens first.
+
+    Deliberately conservative — returns None unless a factual question matches
+    an FAQ strongly. Advisory questions are excluded outright, because that is
+    where sales judgement lives.
+    """
+    if is_advisory(normalized):
+        metrics.mark("fast_path_skipped", "advisory")
+        return None
+
+    faq_hits = await retrieval.search_faqs(db, str(tenant.id), search_query)
+    if not faq_hits:
+        return None
+
+    top = faq_hits[0]
+    metrics.mark("fast_path_faq_rank", round(top.rank, 4))
+    if top.rank >= settings.FTS_FAST_PATH_RANK:
+        metrics.mark("path", "faq_fast_path_prerouter")
+        cta = (tenant.settings or {}).get("cta")
+        return QAResult(
+            answer=append_cta(top.answer, cta),
+            handled_by="faq_fast_path",
+            cacheable=True,
+        )
+    return None
 
 
 async def _compose(
@@ -164,7 +203,7 @@ async def handle(
             cacheable=True,
         )
 
-    # Basic plan: templated only, escalate when unsure.
+    # Basic plan: accurate retrieval, templated delivery, escalate when unsure.
     if not tenant.is_pro:
         if product_hits and not advisory:
             metrics.mark("path", "basic_template")
@@ -173,6 +212,24 @@ async def handle(
                 handled_by="catalog_template",
                 cacheable=True,
             )
+
+        # Keyword search missed. Try semantics before giving up — "how long for
+        # shipping?" will not lexically match an FAQ titled "How long does
+        # delivery take?", and escalating that to a human is a poor outcome when
+        # the answer is sitting in the tenant's own data.
+        if not advisory:
+            faq_chunks = await retrieval.semantic_search_chunks(
+                str(tenant.id), search_query, limit=2, source_type="faq"
+            )
+            metrics.mark("basic_semantic_hits", len(faq_chunks))
+            if faq_chunks:
+                answer = faq_chunks[0].metadata.get("answer")
+                if answer:
+                    metrics.mark("path", "basic_semantic_faq")
+                    return QAResult(
+                        answer=answer, handled_by="faq_semantic", cacheable=True
+                    )
+
         metrics.mark("path", "basic_escalate")
         return QAResult(
             answer=None, handled_by="catalog_qa", escalate_reason="low_confidence"
@@ -214,4 +271,23 @@ async def handle(
         )
 
     metrics.mark("path", "compose")
-    return await _compose(tenant, raw_message, "\n\n".join(fact_blocks), history)
+    result = await _compose(tenant, raw_message, "\n\n".join(fact_blocks), history)
+
+    # Composition failed (quota exhausted, empty model response). We already
+    # have real facts in hand — answer from a template rather than escalating a
+    # question we can actually answer.
+    if not result.answer and product_hits:
+        metrics.mark("path", "compose_failed_template_fallback")
+        return QAResult(
+            answer=_templated_product_reply(product_hits, currency),
+            handled_by="catalog_template_degraded",
+            cacheable=False,
+        )
+    if not result.answer and faq_hits:
+        metrics.mark("path", "compose_failed_faq_fallback")
+        return QAResult(
+            answer=faq_hits[0].answer,
+            handled_by="faq_degraded",
+            cacheable=False,
+        )
+    return result

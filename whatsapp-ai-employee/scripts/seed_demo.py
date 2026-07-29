@@ -128,6 +128,12 @@ TENANT_SETTINGS = {
     "business_name": "Glow Roots",
     "bot_name": "Roo",
     "tone": "warm, friendly, concise — like a knowledgeable shop assistant",
+    # Delivery promises must come from config, never from a model that could
+    # invent a date. Used in the order summary and confirmation.
+    "delivery_days_default": 5,
+    "delivery_days_metro": 3,
+    "metro_pincode_prefixes": ["11", "40", "56", "60", "70", "50", "38", "41"],
+    "cta": "Would you like to place an order?",
     "welcome_message": "Hi! Welcome to Glow Roots 🌿 How can I help you today?",
     "farewell_message": "Thank you for shopping with Glow Roots!",
     "fallback_message": "Let me check that with our team and get back to you shortly.",
@@ -226,8 +232,15 @@ async def seed() -> None:
             try:
                 vector = await llm_service.embed(text)
                 await qdrant_service.delete_by_source(tenant_id, item["question"][:60])
+                # Store the answer in the payload so a Basic-plan tenant can
+                # return it verbatim without an LLM composing anything.
                 await qdrant_service.upsert(
-                    tenant_id, "faq", item["question"][:60], text, vector, {}
+                    tenant_id,
+                    "faq",
+                    item["question"][:60],
+                    text,
+                    vector,
+                    {"question": item["question"], "answer": item["answer"]},
                 )
                 indexed += 1
             except Exception as exc:  # noqa: BLE001

@@ -9,6 +9,7 @@ per message, not pre-drawn.
 from dataclasses import dataclass, field
 
 from app.core.logging import get_logger
+from app.core.retry import is_rate_limit_error
 from app.services.llm_service import LLMResult, llm_service
 
 log = get_logger("router")
@@ -49,6 +50,10 @@ class RouteDecision:
     confidence: float
     slots: dict = field(default_factory=dict)
     usage: LLMResult | None = None
+    # True when the model call itself failed (quota, empty response, bad JSON).
+    # The caller must degrade to keyword routing, not escalate every message.
+    failed: bool = False
+    rate_limited: bool = False
 
 
 def _build_prompt(message: str, state: dict, history: list[dict], profile: dict) -> str:
@@ -78,9 +83,31 @@ async def route(
     try:
         data, usage = await llm_service.generate_json(SYSTEM_PROMPT, prompt)
     except Exception as exc:  # noqa: BLE001
-        log.error({"event": "router_failed", "error": str(exc)})
-        # Fail into the safest bucket: a human decides.
-        return RouteDecision(intent="other", confidence=0.0)
+        limited = is_rate_limit_error(exc)
+        log.error(
+            {
+                "event": "router_failed",
+                "reason": "rate_limited" if limited else "error",
+                "error": str(exc)[:300],
+            }
+        )
+        return RouteDecision(
+            intent="other", confidence=0.0, failed=True, rate_limited=limited
+        )
+
+    if not data:
+        # Call succeeded but produced nothing parseable (usually a thinking
+        # model that spent its output budget). Degrade, don't escalate.
+        log.warning(
+            {
+                "event": "router_unparseable",
+                "finish_reason": usage.finish_reason,
+                "raw": (usage.text or "")[:200],
+            }
+        )
+        return RouteDecision(
+            intent="other", confidence=0.0, usage=usage, failed=True
+        )
 
     intent = str(data.get("intent", "other")).strip()
     if intent not in INTENTS:

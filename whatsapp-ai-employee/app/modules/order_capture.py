@@ -12,7 +12,7 @@ cannot create an order that is not fulfillable.
 import random
 import string
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,6 +72,23 @@ def _parse_pincode(text: str) -> str | None:
     return digits if len(digits) == 6 else None
 
 
+def _delivery_estimate(tenant, pincode: str | None) -> str:
+    """Friendly delivery date from tenant-configured lead times.
+
+    Deliberately deterministic: a promised date must come from config, never
+    from a model that might invent one.
+    """
+    config = tenant.settings or {}
+    days = int(config.get("delivery_days_default", 5))
+
+    metro_pins = config.get("metro_pincode_prefixes") or []
+    if pincode and any(str(pincode).startswith(str(p)) for p in metro_pins):
+        days = int(config.get("delivery_days_metro", 3))
+
+    eta = datetime.now(timezone.utc) + timedelta(days=days)
+    return eta.strftime("%a, %d %b")
+
+
 async def handle(
     db: AsyncSession,
     tenant: Tenant,
@@ -114,6 +131,22 @@ async def handle(
             draft["product"] = raw_message.strip()
         else:
             draft[awaiting] = raw_message.strip()
+
+    # 2b. A SKU from a deep link / QR / ad is authoritative — resolve it directly
+    # so the customer never has to name the product they just tapped on.
+    if slots.get("sku") and not draft.get("sku"):
+        hit = await retrieval.get_product_by_sku(db, str(tenant.id), slots["sku"])
+        if hit:
+            draft.update(
+                {
+                    "sku": hit.sku,
+                    "product": hit.name,
+                    "unit_price": hit.price,
+                    "product_id": hit.id,
+                    "stock": hit.stock,
+                }
+            )
+            metrics.mark("entry_point_sku_resolved", hit.sku)
 
     # 3. Resolve the product against the real catalog (never trust free text).
     if draft.get("product") and not draft.get("sku"):
@@ -171,6 +204,41 @@ async def handle(
         )
 
     total = float(draft["unit_price"]) * qty
+
+    # 5b. Summary and explicit confirmation before the order exists.
+    # A good salesperson reads the order back with the total and the delivery
+    # date rather than silently booking it. It also catches wrong addresses
+    # before anything ships, which is far cheaper than a return.
+    if slots.get("confirm") is False:
+        return OrderResult(
+            answer="No problem — nothing has been ordered. Anything you'd like to change?",
+            handled_by="order_cancelled",
+            state_update={"order": {}, "awaiting": None, "flow": None},
+        )
+
+    if not slots.get("confirm"):
+        currency = tenant.currency or "INR"
+        eta = _delivery_estimate(tenant, draft.get("pincode"))
+        pay_line = (
+            "Cash on delivery"
+            if draft["payment_method"] == "cod"
+            else "Pay online (link to follow)"
+        )
+        summary = (
+            "Here's your order:\n\n"
+            f"{qty} x {draft['product']}"
+            + (f" ({draft.get('size')})" if draft.get("size") else "")
+            + f"\nTotal: {currency} {total:.0f}\n"
+            f"Delivery to {draft['pincode']} by {eta}\n"
+            f"Payment: {pay_line}\n\n"
+            "Shall I confirm it?"
+        )
+        return OrderResult(
+            answer=summary,
+            handled_by="order_summary",
+            state_update={"order": draft, "awaiting": "confirm", "flow": "order"},
+        )
+
     order = Order(
         tenant_id=tenant.id,
         customer_id=customer.id,
@@ -197,16 +265,20 @@ async def handle(
     await db.flush()
 
     currency = tenant.currency or "INR"
+    eta = _delivery_estimate(tenant, draft.get("pincode"))
     if draft["payment_method"] == "cod":
-        closing = "You'll pay on delivery."
+        closing = f"Please keep {currency} {total:.0f} ready for the delivery agent."
     else:
         # Phase 2 replaces this with a real Razorpay link.
-        closing = "I'll send you a payment link here shortly."
+        # A tappable link beats a QR in chat: it opens the customer's UPI app on
+        # the same device. QR only makes sense when they're scanning from another
+        # screen or printed material.
+        closing = "I'll send your payment link here in a moment."
 
     answer = (
-        f"Order {order.order_number} confirmed:\n"
+        f"Order {order.order_number} confirmed. Thank you!\n\n"
         f"{qty} x {draft['product']} — {currency} {total:.0f}\n"
-        f"Delivering to {draft['pincode']}.\n{closing}"
+        f"Arriving by {eta} at {draft['pincode']}\n\n{closing}"
     )
 
     await event_bus.emit(

@@ -1,0 +1,58 @@
+services:
+  api:
+    build: .
+    env_file: ../.env
+    environment:
+      POSTGRES_SERVER: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: aiemployee
+      POSTGRES_PASSWORD: aiemployee
+      POSTGRES_DB: aiemployee
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      AUTO_CREATE_TABLES: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    volumes:
+      - ./:/app
+      - ../firebase-service-account.json:/app/firebase-service-account.json:ro
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aiemployee
+      POSTGRES_PASSWORD: aiemployee
+      POSTGRES_DB: aiemployee
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiemployee"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+volumes:
+  pgdata:
+  qdrantdata:

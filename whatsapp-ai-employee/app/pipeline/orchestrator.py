@@ -181,27 +181,42 @@ async def process_message(
     state = dict(conversation.state or {})
     active_flow = state.get("flow")
 
-    # --- step 6: keyword fast path, BEFORE any model call ---
-    # Skipped mid-flow: a message during order capture is an answer to our last
-    # question, not a new query to look up.
-    if not active_flow:
+    # --- step 6: deterministic intent gate (pure regex, no DB, no model) ---
+    # Runs BEFORE the FAQ lookup. "where is my order" must never be answered by
+    # an FAQ that happens to contain the word "orders" — a transactional intent
+    # outranks a keyword match, and checking it first is also cheaper than the
+    # database query.
+    fast = fast_intent.classify(
+        normalized, raw_message, state=state, entry_context=entry_context or {}
+    )
+    if fast:
+        metrics.mark("fast_intent", f"{fast.intent}:{fast.reason}")
+
+    # --- step 7: keyword FAQ fast path ---
+    # Only when the message is not already claimed by a transactional intent,
+    # and not mid-flow (a message during order capture answers our last question
+    # rather than asking a new one).
+    faq_eligible = not active_flow and (fast is None or fast.intent == "catalog_qa")
+    if faq_eligible:
         t0 = time.perf_counter()
-        fast = await catalog_qa.try_fast_path(
+        faq_hit = await catalog_qa.try_fast_path(
             db, tenant, normalized=normalized, search_query=search_query, metrics=metrics
         )
         metrics.record("fast_path", t0)
-        if fast and fast.answer:
-            outcome.reply = fast.answer
+        if faq_hit and faq_hit.answer:
+            outcome.reply = faq_hit.answer
             outcome.intent = "catalog_qa"
-            outcome.handled_by = fast.handled_by
-            if fast.cacheable:
-                await redis_service.set_answer(cache_key, fast.answer)
+            outcome.handled_by = faq_hit.handled_by
+            if faq_hit.cacheable:
+                await redis_service.set_answer(cache_key, faq_hit.answer)
             await redis_service.add_history(
                 str(conversation.id), raw_message, outcome.reply
             )
             return outcome
+    elif fast:
+        metrics.mark("faq_skipped", f"intent_claimed:{fast.intent}")
 
-    # --- steps 7-8: route, then dispatch ---
+    # --- step 8: route, then dispatch ---
     router_degraded = False
 
     # Mid-flow shortcut: while collecting order details, an incoming message is
@@ -212,12 +227,6 @@ async def process_message(
         active_flow == "order"
         and state.get("awaiting")
         and not looks_like_topic_change(normalized)
-    )
-    # Confidence gate: a deterministic classifier handles the unmistakable
-    # messages for free, and the LLM router is called only when this returns
-    # None. High precision by design — see fast_intent's contract.
-    fast = fast_intent.classify(
-        normalized, raw_message, state=state, entry_context=entry_context or {}
     )
 
     if skip_router:

@@ -25,6 +25,22 @@ class TestCascadeOrdering:
             "message costs a model call"
         )
 
+    def test_intent_gate_runs_before_faq_lookup(self):
+        """A transactional intent must outrank a keyword match.
+
+        Regression: "where is my order" was answered by the delivery-charges FAQ,
+        because that FAQ's text contains the word "orders" and the FAQ lookup ran
+        first. Deterministic intent classification is both more correct here and
+        cheaper (regex vs a database query).
+        """
+        src = _source()
+        assert src.index("fast_intent.classify") < src.index("try_fast_path")
+
+    def test_faq_gated_on_intent(self):
+        src = _source()
+        assert "faq_eligible" in src
+        assert 'fast.intent == "catalog_qa"' in src
+
     def test_guardrails_run_before_any_model_call(self):
         src = _source()
         assert src.index("check_inbound") < src.index("router.route")
@@ -52,7 +68,8 @@ class TestDegradation:
     def test_mid_flow_skips_fast_path(self):
         """A message during order capture is an answer, not a new query."""
         src = _source()
-        assert "if not active_flow:" in src
+        assert "not active_flow" in src
+        assert "faq_eligible" in src
 
 
 class TestHeuristicRouter:

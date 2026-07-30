@@ -10,6 +10,7 @@ cannot create an order that is not fulfillable.
 """
 
 import random
+import re
 import string
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,9 @@ from app.services.events import ORDER_CREATED, event_bus
 log = get_logger("order_capture")
 
 REQUIRED_SLOTS = ("product", "quantity", "name", "address", "pincode", "payment_method")
+
+# An in-progress order older than this is abandoned, not pending.
+DRAFT_TTL_MINUTES = 30
 
 QUESTIONS = {
     "product": "Which product would you like to order?",
@@ -72,6 +76,23 @@ def _parse_pincode(text: str) -> str | None:
     return digits if len(digits) == 6 else None
 
 
+_QTY_CHANGE_RE = re.compile(
+    r"\b(?:i\s+want|make\s+it|change\s+to|instead|actually|give\s+me|send)\D{0,12}(\d{1,2})\b"
+    r"|^\s*(\d{1,2})\s*(?:please|pls|nos|units|pcs|bottles?)\b"
+)
+
+
+def _extract_quantity_change(normalized: str) -> int | None:
+    """Spot an edit like "i want 3" / "make it 2" during confirmation."""
+    if not normalized:
+        return None
+    match = _QTY_CHANGE_RE.search(normalized)
+    if not match:
+        return None
+    value = next((g for g in match.groups() if g), None)
+    return _parse_quantity(value) if value else None
+
+
 def _product_fields(hit) -> dict:
     """Size is part of the identity of the thing being sold — carry it through
     to the summary so the customer confirms the exact variant."""
@@ -115,6 +136,23 @@ async def handle(
 ) -> OrderResult:
     draft: dict = dict(state.get("order") or {})
     awaiting = state.get("awaiting")
+
+    # Expire stale drafts. An abandoned half-finished order must not survive to
+    # ambush the next conversation — otherwise "i want 3" days later merges into
+    # yesterday's basket and the customer confirms an order they never built.
+    started_at = draft.get("started_at")
+    if started_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(started_at)
+            if age > timedelta(minutes=DRAFT_TTL_MINUTES):
+                metrics.mark("order_draft_expired", str(age))
+                draft = {}
+                awaiting = None
+        except (TypeError, ValueError):
+            draft = {}
+            awaiting = None
+    if not draft.get("started_at"):
+        draft["started_at"] = datetime.now(timezone.utc).isoformat()
 
     # 1. Fold in whatever the router extracted.
     if slots.get("product") and not draft.get("product"):
@@ -262,6 +300,22 @@ async def handle(
         )
 
     if not slots.get("confirm"):
+        # At the confirmation step the customer often edits rather than answers:
+        # "i want 3" means change the quantity, not "show me that summary again".
+        # Re-printing the identical summary is the loop they reported.
+        if awaiting == "confirm":
+            new_qty = _extract_quantity_change(normalized)
+            if new_qty and new_qty != qty:
+                draft["quantity"] = new_qty
+                draft["confirm_attempts"] = 0
+                metrics.mark("order_quantity_changed", new_qty)
+                return await handle(
+                    db, tenant, customer,
+                    raw_message=raw_message, normalized="", slots={},
+                    state={"order": draft, "awaiting": None, "flow": "order"},
+                    metrics=metrics,
+                )
+
         # Track how many times we have asked. Repeating an unanswered question
         # forever is the worst possible failure — the customer cannot escape it.
         attempts = int(draft.get("confirm_attempts", 0))

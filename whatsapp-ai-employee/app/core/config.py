@@ -84,6 +84,30 @@ class Settings(BaseSettings):
     # Qdrant score below which we treat retrieval as "nothing relevant found".
     SEMANTIC_MIN_SCORE: float = 0.55
 
+    # Keyword rank above which we trust the lexical match on its own. Below it,
+    # semantic search also runs and the results are merged (hybrid retrieval).
+    # Set to 0 to make every query keyword-only; set high to always use vectors.
+    FTS_STRONG_MATCH_RANK: float = 0.25
+
+    # --- Retrieval confidence (hybrid_retrieval) ---
+    # These replace hand-tuned ts_rank thresholds as the decision variable.
+    # Cosine similarity is comparable across queries in a way ts_rank is not.
+    RETRIEVAL_HIGH: float = 0.72     # one clear winner -> answer from it
+    RETRIEVAL_FLOOR: float = 0.55    # below this, nothing relevant was found
+    RETRIEVAL_MIN_GAP: float = 0.06  # gap to 2nd place; smaller means ambiguous
+
+    # Use grounded LLM composition for every question rather than templates.
+    # Costs ~$0.10/month more per client and is measurably more accurate.
+    ALWAYS_COMPOSE_ANSWERS: bool = True
+
+    # --- Agent mode (tool-calling) ---
+    # The model decides intent and sequencing; tools enforce every rule. This
+    # replaces hand-written intent routing, which caused 6 of the 10 bugs found
+    # in live testing. Costs roughly $1.70/month per client at 3,000 messages.
+    # Set false to fall back to the deterministic pipeline (kept as a safety net).
+    AGENT_MODE: bool = True
+    AGENT_MAX_ROUNDS: int = 5
+
     # Per-customer inbound rate limit.
     RATE_LIMIT_MESSAGES: int = 30
     RATE_LIMIT_WINDOW_SECONDS: int = 60

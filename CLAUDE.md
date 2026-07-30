@@ -8,13 +8,33 @@ The user often works from a remote machine and cannot see chat replies there.
 
 **When the user says "read question" (or any variation of it):**
 
-1. Read `question.md` at the repo root — that is the actual question, regardless
-   of what the chat message says.
-2. Answer it.
-3. **Write the full answer to `answer.md` at the repo root**, overwriting whatever
-   was there. This is the deliverable — the user pulls it with git and reads it
-   on the other machine.
+1. `git fetch origin` in the repo root, then read the LATEST question with
+   `git show origin/main:question.md`. Do **not** just read the working-tree
+   copy — it is usually stale, because this sandbox cannot check out.
+2. Answer it, making whatever code changes it requires.
+3. **Write the full answer to `answer.md` at the repo root**, overwriting
+   whatever was there. This is the deliverable — the user pulls it with git and
+   reads it on the other machine.
 4. Keep the chat reply short; `answer.md` carries the detail.
+5. Tell the user to commit and push (see limitation below).
+
+### Sandbox git limitation — verified, do not retry
+
+From this machine Claude **can**:
+- `git fetch` and read any remote file via `git show origin/main:<path>`
+- read local files, and Write/Edit files in the working tree
+
+Claude **cannot**:
+- `git pull` / checkout — the mount forbids unlinking files
+  (`error: unable to unlink old 'question.md': Operation not permitted`)
+- `git add` / `git commit` — cannot create or clear `.git/index.lock`
+- `git push` — no credentials in the sandbox
+  (`could not read Username for 'https://github.com'`)
+
+So the loop is: **Claude writes files → the user commits and pushes from
+Windows → the user pulls on the main laptop.** Always end a "read question"
+reply by reminding the user to commit and push, since nothing Claude writes
+reaches the other machine on its own.
 
 `answer.md` must stand alone: the user reads it without the chat context. Include
 what was asked, what was found, what changed, and what to run next. Date it.

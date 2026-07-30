@@ -17,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import Tenant
-from app.modules import retrieval
+from app.modules import hybrid_retrieval, retrieval
 from app.pipeline.guardrails import CLAIMS_SYSTEM_RULES, sanitize_outbound
+from app.pipeline.sales_state import SalesContext
 from app.pipeline.text_signals import is_advisory, is_factual
 from app.services.llm_service import llm_service
 
@@ -134,6 +135,8 @@ async def _compose(
     question: str,
     facts: str,
     history: list[dict],
+    sales: "SalesContext | None" = None,
+    ambiguous: bool = False,
 ) -> QAResult:
     """One cheap LLM call: turn retrieved facts into a reply that also sells."""
     settings_dict = tenant.settings or {}
@@ -149,11 +152,24 @@ async def _compose(
         "- If the FACTS block does not contain the answer, say you will check "
         "with the team. Do not guess.\n"
         "- Keep it under 60 words. WhatsApp, not email.\n"
-        "- You may suggest a relevant product from the FACTS block as an add-on "
-        "when it genuinely fits, then invite the next step.\n"
         "- Never use markdown headings or bullet symbols other than a dash.\n\n"
+        "SALES BEHAVIOUR:\n"
+        "- Answer first, then advance one step toward the goal below.\n"
+        "- Exactly ONE question per reply. Never stack two.\n"
+        "- Never re-ask something already known.\n"
+        "- Do not push if they have declined twice.\n\n"
         + CLAIMS_SYSTEM_RULES
     )
+
+    if ambiguous:
+        system += (
+            "\nSEVERAL PRODUCTS MATCH EQUALLY WELL. Do not pick one — list the "
+            "options briefly with size and price and ask which they want. "
+            "Guessing a variant means shipping the wrong item.\n"
+        )
+
+    if sales is not None:
+        system += "\n" + sales.as_prompt_block() + "\n"
 
     history_text = ""
     if history:
@@ -190,10 +206,62 @@ async def handle(
     search_query: str,
     history: list[dict],
     metrics,
+    sales: "SalesContext | None" = None,
 ) -> QAResult:
     currency = tenant.currency or "INR"
     advisory = is_advisory(normalized)
     metrics.mark("advisory", advisory)
+
+    # --- confidence-driven path (default) ---
+    # Retrieval confidence decides, not hand-tuned keyword thresholds. Semantic
+    # similarity is comparable across queries; ts_rank is not.
+    if settings.ALWAYS_COMPOSE_ANSWERS and tenant.is_pro:
+        found = await hybrid_retrieval.retrieve(
+            db, tenant, search_query, metrics=metrics
+        )
+
+        if found.confidence is hybrid_retrieval.Confidence.NONE:
+            # Nothing in the tenant's own data matches. Grounded means we do not
+            # improvise from general knowledge — escalate instead.
+            metrics.mark("path", "no_grounding")
+            return QAResult(
+                answer=None, handled_by="catalog_qa", escalate_reason="low_confidence"
+            )
+
+        metrics.mark("path", f"compose_{found.confidence.value}")
+        result = await _compose(
+            tenant,
+            raw_message,
+            found.facts_block(currency),
+            history,
+            sales=sales,
+            ambiguous=found.confidence is hybrid_retrieval.Confidence.AMBIGUOUS,
+        )
+
+        # Degrade to the retrieved fact rather than escalating a question we can
+        # actually answer (quota exhaustion, empty model response).
+        if not result.answer and found.top:
+            top = found.top
+            metrics.mark("path", "compose_failed_fact_fallback")
+            if top.kind == "faq":
+                return QAResult(
+                    answer=append_cta(top.payload.get("answer") or top.text,
+                                      sales.cta if sales else None),
+                    handled_by="faq_degraded",
+                )
+            p = top.payload
+            size = f" ({p.get('size')})" if p.get("size") else ""
+            return QAResult(
+                answer=append_cta(
+                    f"{p.get('name')}{size} is {currency} {p.get('price'):.0f} and is "
+                    + ("in stock." if (p.get("stock") or 0) > 0 else "out of stock."),
+                    sales.cta if sales else None,
+                ),
+                handled_by="catalog_template_degraded",
+            )
+        return result
+
+    # --- legacy keyword-first path (Basic plan, or ALWAYS_COMPOSE_ANSWERS off) ---
 
     # --- step 1: cheap keyword search (no API calls) ---
     faq_hits = await retrieval.search_faqs(db, str(tenant.id), search_query)
@@ -268,12 +336,29 @@ async def handle(
             "Store info:\n" + "\n".join(f"- {h.question} {h.answer}" for h in faq_hits[:3])
         )
 
-    # --- step 3: vectors only if keyword search found nothing ---
-    if not fact_blocks:
+    # --- step 3: hybrid retrieval ---
+    # Semantics used to run ONLY when keyword search found nothing, which meant a
+    # weak-but-nonzero lexical match (very common with OR queries) blocked the
+    # vector search entirely — the customer's actual meaning was never consulted.
+    # Now we also run it whenever the keyword match is weak, and merge.
+    best_rank = max(
+        [h.rank for h in product_hits] + [h.rank for h in faq_hits] + [0.0]
+    )
+    metrics.mark("best_fts_rank", round(best_rank, 4))
+
+    if not fact_blocks or best_rank < settings.FTS_STRONG_MATCH_RANK:
         chunks = await retrieval.semantic_search(str(tenant.id), search_query)
         metrics.mark("semantic_chunks", len(chunks))
         if chunks:
-            fact_blocks.append("Reference information:\n" + "\n".join(f"- {c}" for c in chunks))
+            # De-duplicate: a chunk whose text is already covered by the keyword
+            # facts adds nothing but tokens.
+            existing = " ".join(fact_blocks).lower()
+            fresh = [c for c in chunks if c[:60].lower() not in existing]
+            if fresh:
+                fact_blocks.append(
+                    "Reference information:\n" + "\n".join(f"- {c}" for c in fresh)
+                )
+                metrics.mark("semantic_merged", len(fresh))
 
     if not fact_blocks:
         # Nothing in the tenant's own data matches. Grounded means we do not

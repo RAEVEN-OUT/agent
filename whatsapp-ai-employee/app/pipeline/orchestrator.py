@@ -21,11 +21,13 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import loop as agent_loop
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.metrics import PipelineMetrics
 from app.db.models import Conversation, Customer, Tenant, UsageLog
 from app.modules import catalog_qa, consultation, escalation, order_capture, order_status
-from app.pipeline import fast_intent, guardrails, router
+from app.pipeline import fast_intent, guardrails, router, sales_state
 from app.pipeline.normalize import (
     is_meaningless,
     local_rewrite,
@@ -34,6 +36,7 @@ from app.pipeline.normalize import (
     normalize,
 )
 from app.pipeline.smalltalk import canned_reply, detect_smalltalk
+from app.services.llm_service import llm_service
 from app.services.redis_service import redis_service
 
 log = get_logger("orchestrator")
@@ -181,6 +184,73 @@ async def process_message(
     state = dict(conversation.state or {})
     active_flow = state.get("flow")
 
+    # Where is this conversation? Derived from live facts, never stored, so it
+    # cannot drift. Every composed reply gets this so it advances the sale
+    # instead of answering and stopping.
+    sales = await sales_state.derive(
+        db, tenant, customer, state, history_len=len(history)
+    )
+    metrics.mark("sales", sales.as_trace())
+
+    # --- AGENT MODE ---
+    # Everything above this line is policy and hygiene: safety guardrails,
+    # small talk, cache, idempotency. Those stay deterministic on purpose.
+    # Everything below — understanding what the customer meant and deciding what
+    # to do next — is handed to the model with tools, because hand-writing it is
+    # what produced most of the bugs found in live testing.
+    if settings.AGENT_MODE and tenant.is_pro and llm_service.available:
+        t0 = time.perf_counter()
+        agent_result = await agent_loop.run(
+            db=db,
+            tenant=tenant,
+            customer=customer,
+            conversation=conversation,
+            message=raw_message,
+            history=history,
+            sales=sales,
+            metrics=metrics,
+        )
+        metrics.record("agent", t0)
+        metrics.mark("tools", agent_result.tool_calls)
+        metrics.mark("agent_rounds", agent_result.rounds)
+        if agent_result.input_tokens or agent_result.output_tokens:
+            metrics.add_usage(agent_result.input_tokens, agent_result.output_tokens)
+
+        if not agent_result.failed and agent_result.reply:
+            outcome.reply = agent_result.reply
+            outcome.intent = "agent"
+            outcome.handled_by = "agent:" + ",".join(agent_result.tool_calls[:4] or ["reply"])
+
+            if agent_result.escalation_reason:
+                await escalation.raise_escalation(
+                    db, tenant, conversation,
+                    reason=agent_result.escalation_reason
+                    if agent_result.escalation_reason in escalation.LOCKING_REASONS
+                    else "low_confidence",
+                    detail=raw_message,
+                    customer_wa_id=customer.wa_id,
+                )
+                outcome.escalated = True
+
+            if metrics.llm_calls:
+                db.add(
+                    UsageLog(
+                        tenant_id=tenant.id, kind="llm",
+                        input_tokens=metrics.input_tokens,
+                        output_tokens=metrics.output_tokens,
+                        units=metrics.llm_calls,
+                        meta={"mode": "agent", "tools": agent_result.tool_calls},
+                    )
+                )
+            await redis_service.add_history(
+                str(conversation.id), raw_message, outcome.reply
+            )
+            return outcome
+
+        # Agent failed (quota, empty response, max rounds). Fall through to the
+        # deterministic pipeline rather than leaving the customer with silence.
+        metrics.mark("agent_degraded", True)
+
     # --- step 6: deterministic intent gate (pure regex, no DB, no model) ---
     # Runs BEFORE the FAQ lookup. "where is my order" must never be answered by
     # an FAQ that happens to contain the word "orders" — a transactional intent
@@ -302,10 +372,14 @@ async def process_message(
         outcome.handled_by = "human_request"
 
     elif intent == "order_status":
-        result = await order_status.handle(db, tenant, customer, metrics=metrics)
+        result = await order_status.handle(
+            db, tenant, customer, raw_message=raw_message, metrics=metrics
+        )
         outcome.reply = result.answer
         outcome.handled_by = result.handled_by
         escalate_reason = result.escalate_reason
+        if result.input_tokens or result.output_tokens:
+            metrics.add_usage(result.input_tokens, result.output_tokens)
 
     elif intent == "order_capture":
         result = await order_capture.handle(
@@ -337,6 +411,7 @@ async def process_message(
             db, tenant,
             raw_message=raw_message, normalized=normalized,
             search_query=search_query, history=history, metrics=metrics,
+            sales=sales,
         )
         outcome.reply = result.answer
         outcome.handled_by = result.handled_by

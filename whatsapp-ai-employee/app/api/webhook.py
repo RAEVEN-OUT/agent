@@ -234,13 +234,23 @@ async def _handle_message(
         # We are always inside the 24h service window here (the customer just
         # messaged us), so a free-form reply is allowed and free.
         sent_id = None
+        send_error = None
         try:
             response = await whatsapp_service.send_text(
                 tenant.whatsapp_phone_number_id, wa_id, outcome.reply
             )
             sent_id = (response.get("messages") or [{}])[0].get("id")
         except Exception as exc:  # noqa: BLE001
-            log.error({"event": "reply_send_failed", "error": str(exc)})
+            send_error = str(exc)[:300]
+            log.error({"event": "reply_send_failed", "error": send_error})
+
+        # Record the reply either way, flagged when undelivered. Without this a
+        # dead token looks like "the bot said nothing" instead of "the bot
+        # answered correctly and delivery failed" — very different bugs.
+        meta = outcome.metrics.as_dict()
+        if send_error:
+            meta["send_failed"] = True
+            meta["send_error"] = send_error
 
         db.add(
             Message(
@@ -252,7 +262,7 @@ async def _handle_message(
                 body=outcome.reply,
                 intent=outcome.intent,
                 handled_by=outcome.handled_by,
-                meta=outcome.metrics.as_dict(),
+                meta=meta,
             )
         )
         await db.commit()

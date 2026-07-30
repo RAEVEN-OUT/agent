@@ -309,7 +309,8 @@ async def process_message(
     elif intent == "consultation":
         result = await consultation.handle(
             db, tenant, customer,
-            raw_message=raw_message, slots=slots, state=state, metrics=metrics,
+            raw_message=raw_message, normalized=normalized,
+            slots=slots, state=state, metrics=metrics,
         )
         outcome.reply = result.answer
         outcome.handled_by = result.handled_by

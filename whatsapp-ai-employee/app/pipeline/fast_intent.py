@@ -56,6 +56,10 @@ PRICE_PATTERNS = (
 STOCK_PATTERNS = (
     "in stock", "available", "availability", "do you have", "is it there",
     "out of stock", "restock",
+    # Real customers rarely phrase it formally. After shorthand expansion
+    # ("u" -> "you"), these are the common forms.
+    "you got", "you have", "you sell", "got any", "have any", "do you sell",
+    "is there any", "any stock",
 )
 
 PAYMENT_PATTERNS = (

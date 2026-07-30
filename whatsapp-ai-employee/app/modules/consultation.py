@@ -5,6 +5,7 @@ occasion/size intake; only the question set differs. That question set lives in
 tenant settings, so a new vertical is a config change, not a new module.
 """
 
+import re
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,12 +51,51 @@ def _next_missing(spec: list[dict], known: dict) -> dict | None:
     return None
 
 
+# "no", "none", "any" are legitimate answers meaning "no preference". Treating
+# them as an empty slot makes the bot re-ask the same question forever — which
+# is exactly what happened in testing.
+DECLINE_WORDS = {
+    "no", "none", "nope", "any", "anything", "no preference", "doesnt matter",
+    "does not matter", "not sure", "dont know", "do not know", "skip", "na",
+    "no budget", "not really", "whatever", "up to you", "you decide",
+}
+
+NO_PREFERENCE = "any"
+
+
+def _interpret_answer(slot: str, raw_message: str, normalized: str) -> str | None:
+    """Read this message as the answer to the question we just asked.
+
+    Always returns something for non-empty input. An intake that cannot accept
+    an answer is worse than one that accepts a slightly wrong one — the customer
+    can correct a wrong value, but cannot escape a loop.
+    """
+    text = (normalized or "").strip()
+    if not text:
+        return None
+
+    stripped = re.sub(r"[^\w\s]", "", text).strip()
+    if stripped in DECLINE_WORDS or any(
+        stripped.startswith(f"{word} ") for word in ("no ", "any ", "not ")
+    ):
+        return NO_PREFERENCE
+
+    if slot == "budget":
+        match = re.search(r"(\d[\d,]{1,7})", text.replace(",", ""))
+        if match:
+            return match.group(1)
+        return NO_PREFERENCE  # they said something non-numeric; stop asking
+
+    return raw_message.strip()[:80]
+
+
 async def handle(
     db: AsyncSession,
     tenant: Tenant,
     customer: Customer,
     *,
     raw_message: str,
+    normalized: str = "",
     slots: dict,
     state: dict,
     metrics,
@@ -79,21 +119,49 @@ async def handle(
         if slots.get(key):
             known[key] = slots[key]
 
+    # Interpret this message as the answer to the slot we last asked about.
+    # Without this, a slot only ever gets filled if the LLM router happens to
+    # extract it — and "none" or "no" extract nothing, so the same question
+    # repeats indefinitely.
+    awaiting = state.get("consult_awaiting")
+    if awaiting and not known.get(awaiting):
+        value = _interpret_answer(awaiting, raw_message, normalized)
+        if value:
+            known[awaiting] = value
+            metrics.mark("consult_slot_filled", f"{awaiting}={value}")
+
     missing = _next_missing(spec, known)
     if missing:
         metrics.mark("path", "consult_question")
         return ConsultResult(
             answer=missing["question"],
             handled_by="consultation_intake",
-            state_update={"consult": known, "flow": "consultation"},
+            state_update={
+                "consult": known,
+                "consult_awaiting": missing["slot"],
+                "flow": "consultation",
+            },
             profile_update=known,
         )
 
     # Profile complete -> recommend from this tenant's catalog only.
-    search_terms = " ".join(
-        str(known.get(k, "")) for k in ("concern", "hair_type") if known.get(k)
-    )
-    products = await retrieval.search_products(db, str(tenant.id), search_terms, limit=6)
+    # Search the CONCERN first, on its own. Concern is what the customer asked
+    # about ("dandruff"); hair type is a qualifier. Mixing them lets a strong
+    # hair-type match outrank the actual problem — which is how "which shampoo
+    # for dandruff" ended up recommending a dry-hair oil.
+    concern = str(known.get("concern") or "").strip()
+    hair_type = str(known.get("hair_type") or "").strip()
+
+    products: list = []
+    if concern and concern != NO_PREFERENCE:
+        products = await retrieval.search_products(db, str(tenant.id), concern, limit=6)
+        metrics.mark("consult_concern_hits", len(products))
+
+    if not products:
+        combined = " ".join(t for t in (concern, hair_type) if t and t != NO_PREFERENCE)
+        if combined:
+            products = await retrieval.search_products(db, str(tenant.id), combined, limit=6)
+
     if not products:
         products = await retrieval.search_products(db, str(tenant.id), "hair", limit=6)
 
@@ -107,9 +175,9 @@ async def handle(
         )
 
     budget = known.get("budget")
-    if budget:
+    if budget and budget != NO_PREFERENCE:
         try:
-            limit_value = float(budget)
+            limit_value = float(str(budget).replace(",", ""))
             in_budget = [p for p in products if p.price <= limit_value * 1.15]
             products = in_budget or products
         except (TypeError, ValueError):
@@ -129,6 +197,9 @@ async def handle(
         "Recommend a routine of 1-3 products from the FACTS list only.\n"
         "Explain in one short line why each suits this customer.\n"
         "Never invent products, prices or ingredients. Under 80 words.\n"
+        "Address the customer's stated CONCERN first — it matters more than "
+        "their hair type.\n"
+        "Do not greet them again; you are mid-conversation.\n"
         "End by asking if they'd like to order.\n\n" + CLAIMS_SYSTEM_RULES
     )
     prompt = (
@@ -156,7 +227,7 @@ async def handle(
     return ConsultResult(
         answer=safe_text,
         handled_by="consultation_recommend",
-        state_update={"consult": known, "flow": None},
+        state_update={"consult": known, "consult_awaiting": None, "flow": None},
         profile_update=known,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,

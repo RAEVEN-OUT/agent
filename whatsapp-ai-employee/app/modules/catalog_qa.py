@@ -105,6 +105,19 @@ async def try_fast_path(
 
     top = faq_hits[0]
     metrics.mark("fast_path_faq_rank", round(top.rank, 4))
+
+    # Arbitration: an FAQ must not hijack a product question.
+    # "do you have shampoo" lexically matches the FAQ "are the products sulphate
+    # free" (its answer contains the word "shampoos"), which would answer a
+    # stock question with a chemistry fact. If a product matches at least as
+    # well, this is a product question — hand it to the full path.
+    product_hits = await retrieval.search_products(db, str(tenant.id), search_query, limit=1)
+    if product_hits:
+        metrics.mark("fast_path_product_rank", round(product_hits[0].rank, 4))
+        if product_hits[0].rank >= top.rank:
+            metrics.mark("fast_path_skipped", "product_matched_stronger")
+            return None
+
     if top.rank >= settings.FTS_FAST_PATH_RANK:
         metrics.mark("path", "faq_fast_path_prerouter")
         cta = (tenant.settings or {}).get("cta")

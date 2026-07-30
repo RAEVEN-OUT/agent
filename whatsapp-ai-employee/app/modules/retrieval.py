@@ -17,8 +17,13 @@ from app.services.qdrant_service import qdrant_service
 
 log = get_logger("retrieval")
 
+# Attributes MUST be in the searchable document. Without them, a query like
+# "dandruff" cannot match the Tea Tree shampoo, because the word only exists in
+# attributes.concern — never in the name or description. That silently produces
+# confident recommendations of the wrong product.
 _PRODUCT_DOC = (
-    "coalesce(name,'') || ' ' || coalesce(description,'') || ' ' || coalesce(size,'')"
+    "coalesce(name,'') || ' ' || coalesce(description,'') || ' ' "
+    "|| coalesce(size,'') || ' ' || coalesce(attributes::text,'')"
 )
 
 PRODUCT_FTS_SQL = text(

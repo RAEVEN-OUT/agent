@@ -224,7 +224,10 @@ async def process_message(
         metrics.mark("router_skipped", "mid_flow_slot_answer")
         intent = "order_capture"
         confidence = 1.0
-        slots = {}
+        # Take the deterministic slots even when skipping the router, otherwise
+        # "yes" at the confirmation step arrives with no confirm flag and the
+        # summary repeats forever.
+        slots = fast.slots if (fast and fast.intent == "order_capture") else {}
     elif fast:
         metrics.mark("router_skipped", fast.reason)
         intent = fast.intent

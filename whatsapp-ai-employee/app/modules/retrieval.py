@@ -5,6 +5,7 @@ no API call. The embedding + Qdrant path only runs when keyword search is not
 confident, which in practice is the minority of messages.
 """
 
+import re
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -26,15 +27,47 @@ _PRODUCT_DOC = (
     "|| coalesce(size,'') || ' ' || coalesce(attributes::text,'')"
 )
 
+# plainto_tsquery ANDs every term, which is catastrophic for conversational
+# input: "how much is argan oil" becomes 'much & argan & oil', and because no
+# product contains the word "much" it matches NOTHING. Real customers pad every
+# question with filler, so AND semantics means near-total retrieval failure.
+#
+# We OR the meaningful terms instead and let ts_rank do the discriminating —
+# documents matching more terms rank higher, and the threshold filters the rest.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+_FILLER_WORDS = frozenset(
+    """
+    the a an and or of in on at to for from with is are was were be been am
+    do does did done have has had having how what which who whom why when where
+    much many more most some any all this that these those there here
+    you your yours i me my mine we us our ours it its they them their
+    please pls kindly tell show give send need want looking got get
+    hi hello hey ok okay yes no not can could would should will shall may
+    about like just also very really too so if then than but
+    """.split()
+)
+
+
+def build_or_tsquery(text_value: str) -> str:
+    """Turn conversational text into an OR tsquery of meaningful terms."""
+    tokens = [
+        t for t in _TOKEN_RE.findall((text_value or "").lower())
+        if len(t) >= 3 and t not in _FILLER_WORDS
+    ]
+    # dict.fromkeys dedupes while preserving order
+    return " | ".join(dict.fromkeys(tokens))
+
+
 PRODUCT_FTS_SQL = text(
     f"""
     SELECT id::text, sku, name, description, size, price, stock, attributes,
            ts_rank(to_tsvector('english', {_PRODUCT_DOC}),
-                   plainto_tsquery('english', :q)) AS rank
+                   to_tsquery('english', :q)) AS rank
     FROM products
     WHERE tenant_id = :tenant_id
       AND is_active = true
-      AND to_tsvector('english', {_PRODUCT_DOC}) @@ plainto_tsquery('english', :q)
+      AND to_tsvector('english', {_PRODUCT_DOC}) @@ to_tsquery('english', :q)
     ORDER BY rank DESC
     LIMIT :limit
     """
@@ -44,12 +77,12 @@ FAQ_FTS_SQL = text(
     """
     SELECT id::text, question, answer,
            ts_rank(to_tsvector('english', question || ' ' || answer),
-                   plainto_tsquery('english', :q)) AS rank
+                   to_tsquery('english', :q)) AS rank
     FROM faqs
     WHERE tenant_id = :tenant_id
       AND is_active = true
       AND to_tsvector('english', question || ' ' || answer)
-          @@ plainto_tsquery('english', :q)
+          @@ to_tsquery('english', :q)
     ORDER BY rank DESC
     LIMIT :limit
     """
@@ -85,10 +118,11 @@ class FaqHit:
 async def search_products(
     db: AsyncSession, tenant_id: str, query: str, limit: int = 5
 ) -> list[ProductHit]:
-    if not query.strip():
+    tsquery = build_or_tsquery(query)
+    if not tsquery:
         return []
     rows = await db.execute(
-        PRODUCT_FTS_SQL, {"tenant_id": tenant_id, "q": query, "limit": limit}
+        PRODUCT_FTS_SQL, {"tenant_id": tenant_id, "q": tsquery, "limit": limit}
     )
     return [
         ProductHit(
@@ -109,10 +143,11 @@ async def search_products(
 async def search_faqs(
     db: AsyncSession, tenant_id: str, query: str, limit: int = 3
 ) -> list[FaqHit]:
-    if not query.strip():
+    tsquery = build_or_tsquery(query)
+    if not tsquery:
         return []
     rows = await db.execute(
-        FAQ_FTS_SQL, {"tenant_id": tenant_id, "q": query, "limit": limit}
+        FAQ_FTS_SQL, {"tenant_id": tenant_id, "q": tsquery, "limit": limit}
     )
     return [
         FaqHit(id=r[0], question=r[1], answer=r[2], rank=float(r[3])) for r in rows.all()

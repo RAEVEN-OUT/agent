@@ -72,6 +72,19 @@ def _parse_pincode(text: str) -> str | None:
     return digits if len(digits) == 6 else None
 
 
+def _product_fields(hit) -> dict:
+    """Size is part of the identity of the thing being sold — carry it through
+    to the summary so the customer confirms the exact variant."""
+    return {
+        "sku": hit.sku,
+        "product": hit.name,
+        "size": hit.size,
+        "unit_price": hit.price,
+        "product_id": hit.id,
+        "stock": hit.stock,
+    }
+
+
 def _delivery_estimate(tenant, pincode: str | None) -> str:
     """Friendly delivery date from tenant-configured lead times.
 
@@ -148,10 +161,24 @@ async def handle(
             )
             metrics.mark("entry_point_sku_resolved", hit.sku)
 
+    # 2c. Customer picking from a numbered list we offered ("1", "2").
+    if awaiting == "product" and draft.get("candidates") and not draft.get("sku"):
+        choice = _parse_quantity(normalized)
+        candidates = draft["candidates"]
+        if choice and 1 <= choice <= len(candidates):
+            picked = await retrieval.get_product_by_sku(
+                db, str(tenant.id), candidates[choice - 1]
+            )
+            if picked:
+                draft.update(_product_fields(picked))
+                draft.pop("candidates", None)
+
     # 3. Resolve the product against the real catalog (never trust free text).
     if draft.get("product") and not draft.get("sku"):
-        hit = await retrieval.get_product_by_name(db, str(tenant.id), draft["product"])
-        if not hit:
+        currency = tenant.currency or "INR"
+        hits = await retrieval.search_products(db, str(tenant.id), draft["product"], limit=5)
+
+        if not hits:
             return OrderResult(
                 answer=(
                     f"I couldn't find \"{draft['product']}\" in our list. "
@@ -161,6 +188,32 @@ async def handle(
                 state_update={"order": {k: v for k, v in draft.items() if k != "product"},
                               "awaiting": "product", "flow": "order"},
             )
+
+        # Ambiguity check. "oil" matches both the 100ml and 200ml Argan Oil —
+        # picking one silently means shipping the wrong size and refunding it
+        # later. Ask instead. Only skip the question when one match clearly wins.
+        distinct = {h.sku: h for h in hits}
+        if len(distinct) > 1 and hits[1].rank >= hits[0].rank * 0.85:
+            options = list(distinct.values())[:4]
+            lines = [
+                f"{i}. {h.name}" + (f" ({h.size})" if h.size else "")
+                + f" — {currency} {h.price:.0f}"
+                + ("" if h.stock > 0 else " (out of stock)")
+                for i, h in enumerate(options, start=1)
+            ]
+            metrics.mark("path", "order_disambiguate")
+            return OrderResult(
+                answer="We have a few options — which would you like?\n\n"
+                + "\n".join(lines),
+                handled_by="order_disambiguate",
+                state_update={
+                    "order": {**draft, "candidates": [h.sku for h in options]},
+                    "awaiting": "product",
+                    "flow": "order",
+                },
+            )
+
+        hit = hits[0]
         if hit.stock <= 0:
             return OrderResult(
                 answer=(
@@ -171,15 +224,7 @@ async def handle(
                 state_update={"order": draft, "awaiting": None, "flow": None},
                 escalate_reason=None,
             )
-        draft.update(
-            {
-                "sku": hit.sku,
-                "product": hit.name,
-                "unit_price": hit.price,
-                "product_id": hit.id,
-                "stock": hit.stock,
-            }
-        )
+        draft.update(_product_fields(hit))
 
     # 4. Ask for the next missing field, one at a time.
     for slot in REQUIRED_SLOTS:
@@ -217,6 +262,29 @@ async def handle(
         )
 
     if not slots.get("confirm"):
+        # Track how many times we have asked. Repeating an unanswered question
+        # forever is the worst possible failure — the customer cannot escape it.
+        attempts = int(draft.get("confirm_attempts", 0))
+        if awaiting == "confirm":
+            attempts += 1
+            draft["confirm_attempts"] = attempts
+            if attempts >= 3:
+                return OrderResult(
+                    answer=None,
+                    handled_by="order_confirm_stuck",
+                    state_update={"order": draft, "awaiting": None, "flow": None},
+                    escalate_reason="low_confidence",
+                )
+            if attempts == 2:
+                return OrderResult(
+                    answer=(
+                        "Sorry, I didn't catch that. Reply YES to confirm the "
+                        "order, or NO to cancel."
+                    ),
+                    handled_by="order_confirm_retry",
+                    state_update={"order": draft, "awaiting": "confirm", "flow": "order"},
+                )
+
         currency = tenant.currency or "INR"
         eta = _delivery_estimate(tenant, draft.get("pincode"))
         pay_line = (
@@ -250,6 +318,7 @@ async def handle(
             {
                 "sku": draft["sku"],
                 "name": draft["product"],
+                "size": draft.get("size"),
                 "quantity": qty,
                 "unit_price": float(draft["unit_price"]),
             }
@@ -275,9 +344,10 @@ async def handle(
         # screen or printed material.
         closing = "I'll send your payment link here in a moment."
 
+    size_label = f" ({draft.get('size')})" if draft.get("size") else ""
     answer = (
         f"Order {order.order_number} confirmed. Thank you!\n\n"
-        f"{qty} x {draft['product']} — {currency} {total:.0f}\n"
+        f"{qty} x {draft['product']}{size_label} — {currency} {total:.0f}\n"
         f"Arriving by {eta} at {draft['pincode']}\n\n{closing}"
     )
 

@@ -140,13 +140,25 @@ class QdrantService:
             must.append(
                 FieldCondition(key="source_type", match=MatchValue(value=source_type))
             )
+        # qdrant-client renamed search() -> query_points() in recent versions.
+        # Support both so a client upgrade cannot silently disable retrieval.
         try:
-            hits = await self.client.search(
-                collection_name=self.collection,
-                query_vector=vector,
-                query_filter=Filter(must=must),
-                limit=limit,
-            )
+            if hasattr(self.client, "query_points"):
+                response = await self.client.query_points(
+                    collection_name=self.collection,
+                    query=vector,
+                    query_filter=Filter(must=must),
+                    limit=limit,
+                    with_payload=True,
+                )
+                hits = response.points
+            else:  # pragma: no cover - older clients
+                hits = await self.client.search(
+                    collection_name=self.collection,
+                    query_vector=vector,
+                    query_filter=Filter(must=must),
+                    limit=limit,
+                )
         except Exception as exc:  # noqa: BLE001
             log.error({"event": "qdrant_search_failed", "error": str(exc)})
             return []

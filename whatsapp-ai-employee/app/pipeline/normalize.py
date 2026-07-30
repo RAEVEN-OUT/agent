@@ -39,6 +39,16 @@ SHORTHAND = {
     r"\bshampo\b": "shampoo",
     r"\bcondtioner\b": "conditioner",
     r"\bhairfal\b": "hair fall",
+    # US/UK spelling variants. The catalog uses British spellings, customers
+    # type American ones — without this they simply never match.
+    r"\bsulfate\b": "sulphate",
+    r"\bsulfates\b": "sulphate",
+    r"\bsulfate-free\b": "sulphate free",
+    r"\bmoisturizer\b": "moisturiser",
+    r"\bmoisturizing\b": "moisturising",
+    r"\bcolor\b": "colour",
+    r"\bcolored\b": "coloured",
+    r"\bgray\b": "grey",
 }
 
 

@@ -2,6 +2,23 @@
 
 Read this first in any new session.
 
+## Standing instruction: question.md / answer.md
+
+The user often works from a remote machine and cannot see chat replies there.
+
+**When the user says "read question" (or any variation of it):**
+
+1. Read `question.md` at the repo root — that is the actual question, regardless
+   of what the chat message says.
+2. Answer it.
+3. **Write the full answer to `answer.md` at the repo root**, overwriting whatever
+   was there. This is the deliverable — the user pulls it with git and reads it
+   on the other machine.
+4. Keep the chat reply short; `answer.md` carries the detail.
+
+`answer.md` must stand alone: the user reads it without the chat context. Include
+what was asked, what was found, what changed, and what to run next. Date it.
+
 ## Working arrangement
 
 **Two machines, split roles:**

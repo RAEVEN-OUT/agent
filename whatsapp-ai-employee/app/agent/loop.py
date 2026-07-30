@@ -18,6 +18,7 @@ description in the system prompt. No new intent patterns, no new slot logic.
 import json
 from dataclasses import dataclass, field
 
+from app.agent import capabilities
 from app.agent import tools as agent_tools
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -66,6 +67,9 @@ TAKING AN ORDER
   total and delivery date, then wait for an explicit yes.
 - Only then call place_order. If it returns an error, relay it plainly.
 
+HOW THIS BUSINESS WORKS
+{capability_guidance}
+
 TONE
 {tone}
 
@@ -76,11 +80,18 @@ CURRENT CONTEXT
 """
 
 
-def _build_tools():
+def _build_tools(allowed: set[str] | None = None):
+    """Only declare the tools this tenant's capability kit allows.
+
+    A single-product seller never sees search_catalog; a salon never sees
+    place_order. Fewer tools means fewer wrong turns and a smaller prompt.
+    """
     if types is None:
         return None
     declarations = []
     for schema in agent_tools.TOOL_SCHEMAS:
+        if allowed is not None and schema["name"] not in allowed:
+            continue
         try:
             declarations.append(
                 types.FunctionDeclaration(
@@ -140,6 +151,7 @@ async def run(
         business=tenant_settings.get("business_name", tenant.name),
         business_description=tenant_settings.get("business_description", ""),
         tone=tenant_settings.get("tone", "warm, friendly, concise"),
+        capability_guidance=capabilities.prompt_additions(tenant),
         CLAIMS_RULES=CLAIMS_SYSTEM_RULES,
         sales_context=sales.as_prompt_block() if sales else "",
     )
@@ -161,7 +173,9 @@ async def run(
             )
     contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
 
-    tool_config = _build_tools()
+    allowed = capabilities.allowed_tools(tenant)
+    tool_config = _build_tools(allowed)
+    metrics.mark("capabilities", sorted(allowed))
 
     for round_index in range(settings.AGENT_MAX_ROUNDS):
         result.rounds = round_index + 1
@@ -202,16 +216,25 @@ async def run(
                 result.failed = True
             return result
 
-        # Echo the model's tool calls back, then append the results.
-        contents.append(
-            types.Content(
-                role="model",
-                parts=[
-                    types.Part(function_call=types.FunctionCall(name=name, args=args))
-                    for name, args in calls
-                ],
-            )
-        )
+        # Append the model's ACTUAL content object, never a reconstruction.
+        #
+        # Gemini 3.x attaches a `thought_signature` to each functionCall part and
+        # requires it echoed back on the next turn. Rebuilding the part with
+        # types.FunctionCall(name=..., args=...) drops it, and the API rejects the
+        # follow-up with:
+        #   400 "Function call is missing a thought_signature in functionCall parts"
+        # Passing the original candidate content preserves the signature and any
+        # future fields the SDK adds.
+        model_content = None
+        for candidate in getattr(response, "candidates", None) or []:
+            if getattr(candidate, "content", None) is not None:
+                model_content = candidate.content
+                break
+        if model_content is None:  # nothing to echo back; bail rather than loop
+            log.error({"event": "agent_no_candidate_content"})
+            result.failed = True
+            return result
+        contents.append(model_content)
         response_parts = []
         for name, args in calls:
             result.tool_calls.append(name)

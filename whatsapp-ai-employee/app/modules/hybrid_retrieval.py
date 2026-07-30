@@ -91,9 +91,20 @@ class RetrievalResult:
             if hit.kind == "product":
                 p = hit.payload
                 size = f" ({p.get('size')})" if p.get("size") else ""
-                stock = "in stock" if (p.get("stock") or 0) > 0 else "out of stock"
+                price = p.get("price")
+                # A hit may arrive from the vector store, whose payload carries no
+                # price. Never format None, and never guess a number.
+                price_text = (
+                    f"{currency} {float(price):.0f}" if price is not None else "price on request"
+                )
+                stock_value = p.get("stock")
+                stock = (
+                    ("in stock" if stock_value > 0 else "out of stock")
+                    if isinstance(stock_value, int)
+                    else "stock unknown"
+                )
                 lines.append(
-                    f"- PRODUCT {p.get('name')}{size}: {currency} {p.get('price'):.0f}, "
+                    f"- PRODUCT {p.get('name') or hit.title}{size}: {price_text}, "
                     f"{stock}. {p.get('description') or ''}".strip()
                 )
             else:
@@ -237,6 +248,36 @@ async def retrieve(
 
     hits = sorted(merged.values(), key=lambda h: (h.exact, h.score), reverse=True)
     result.hits = hits[:limit]
+
+    # Hydrate product hits from Postgres. The vector store payload is for
+    # *finding* things, never for quoting them: it holds whatever the price was
+    # at index time, so serving from it would quote stale prices and stale stock
+    # after any catalog edit. Postgres is the only source of truth for money.
+    for hit in result.hits:
+        if hit.kind != "product":
+            continue
+        if hit.payload.get("price") is not None and hit.payload.get("stock") is not None:
+            continue
+        sku = hit.payload.get("sku") or hit.ref
+        try:
+            live = await retrieval.get_product_by_sku(db, tenant_id, str(sku))
+        except Exception as exc:  # noqa: BLE001
+            log.warning({"event": "hydrate_failed", "sku": sku, "error": str(exc)[:120]})
+            continue
+        if live:
+            hit.payload.update(
+                {
+                    "sku": live.sku, "name": live.name, "size": live.size,
+                    "price": live.price, "stock": live.stock,
+                    "description": live.description,
+                }
+            )
+            hit.title = live.name
+        else:
+            # Indexed but no longer in the catalog — drop it rather than offer it.
+            hit.payload["stale"] = True
+
+    result.hits = [h for h in result.hits if not h.payload.get("stale")]
 
     if hits:
         result.top_score = hits[0].score

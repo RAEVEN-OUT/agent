@@ -1,37 +1,33 @@
-hi
-Hi! Welcome to Glow Roots 🌿 How can I help you today?
-do you have shampoo for dandruff
-Yes, we have the Tea Tree Clarifying Shampoo (200 ml) for INR 499. It’s formulated with tea tree and salicylic acid for oily scalps and flaking. Would you like to add this to your order, or shall I confirm your current items?
-how long does delivery take
-Metro cities usually get it in 2-3 working days, and the rest of India in 4-6 working days.
+PASS  thanks                          free      0ms
+{"event": "agent_call_failed", "round": 1, "error": "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly, and missing thought_signature may lead to degraded model performance. Additional data, function call `default_api:search_catalog", "level": "ERROR", "logger": "agent.loop"}
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/scripts/eval_harness.py", line 245, in <module>
+    asyncio.run(main())
+  File "/usr/local/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/app/scripts/eval_harness.py", line 177, in main
+    outcome = await process_message(
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/pipeline/orchestrator.py", line 410, in process_message
+    result = await catalog_qa.handle(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/modules/catalog_qa.py", line 235, in handle
+    found.facts_block(currency),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/app/modules/hybrid_retrieval.py", line 96, in facts_block
+    f"- PRODUCT {p.get('name')}{size}: {currency} {p.get('price'):.0f}, "
+                                                  ^^^^^^^^^^^^^^^^^^^^
+TypeError: unsupported format string passed to NoneType.__format__
 
-Would you like to place an order?
-i want 3
-Here's your order:
-
-2 x Argan Repair Hair Oil
-Total: INR 898
-Delivery to 600066 by Sun, 02 Aug
-Payment: Cash on delivery
-
-Shall I confirm it?
-yes
-Order ORD2607308JWX confirmed. Thank you!
-
-2 x Argan Repair Hair Oil — INR 898
-Arriving by Sun, 02 Aug at 600066
-
-Please keep INR 898 ready for the delivery agent.
-wht name is the order under
-Order ORD2607308JWX is received and being prepared.
-Total: INR 898
-when can I expect delivery
-Order ORD2607308JWX is received and being prepared.
-Total: INR 898
-y u didn't ask delivery details
-Order ORD2607308JWX is received and being prepared.
-Total: INR 898
-
-look at this flow,its looping
-
-y is the ai never answering, the faq hits feel trashy, semantics r never checked, keyword check is making lots of issue. pls fix everything and move to phase 2
+What's next:
+    Debug this Compose error with Gordon → docker ai "help me fix this compose error"
+PS D:\Projects\agent\whatsapp-ai-employee> 

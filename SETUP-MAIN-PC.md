@@ -179,8 +179,22 @@ Expect `65 passed`.
 
 ## 5. Connect real WhatsApp
 
-**5a. Start the tunnel** (third terminal, leave running):
+**5a. Start the tunnel** (leave running):
 
+You can start the tunnel using Docker (recommended) or locally:
+
+**Option A: Using Docker (Recommended)**
+1. Open the root `.env` file and set your `NGROK_AUTHTOKEN` from [ngrok.com](https://ngrok.com).
+2. Start the ngrok service:
+   ```powershell
+   docker compose up -d ngrok
+   ```
+3. Get the forwarding URL:
+   - By visiting the ngrok local status page: http://localhost:4040
+   - Or by checking the logs: `docker compose logs ngrok`
+
+**Option B: Running locally**
+If you have ngrok installed locally:
 ```powershell
 ngrok http 8000
 ```

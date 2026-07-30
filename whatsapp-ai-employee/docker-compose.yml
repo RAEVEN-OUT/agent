@@ -53,6 +53,18 @@ services:
     volumes:
       - qdrantdata:/qdrant/storage
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command:
+      - "http"
+      - "api:8000"
+    env_file: ../.env
+    ports:
+      - "4040:4040"
+    depends_on:
+      - api
+
 volumes:
   pgdata:
   qdrantdata:

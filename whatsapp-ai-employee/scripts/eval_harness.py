@@ -97,11 +97,20 @@ def evaluate(case: dict, outcome, latency_ms: float) -> CaseResult:
 
 async def fresh_conversation(db, tenant, customer) -> Conversation:
     """Each case gets a clean conversation so prior state cannot leak in."""
-    await db.execute(
-        delete(Conversation).where(
-            Conversation.tenant_id == tenant.id, Conversation.customer_id == customer.id
+    from app.db.models import Escalation, Message, Order
+    conversations = (
+        await db.execute(
+            select(Conversation.id).where(
+                Conversation.tenant_id == tenant.id, Conversation.customer_id == customer.id
+            )
         )
-    )
+    ).scalars().all()
+
+    if conversations:
+        await db.execute(delete(Message).where(Message.conversation_id.in_(conversations)))
+        await db.execute(delete(Escalation).where(Escalation.conversation_id.in_(conversations)))
+        await db.execute(delete(Order).where(Order.conversation_id.in_(conversations)))
+        await db.execute(delete(Conversation).where(Conversation.id.in_(conversations)))
     conversation = Conversation(tenant_id=tenant.id, customer_id=customer.id, state={})
     db.add(conversation)
     await db.flush()

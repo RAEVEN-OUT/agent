@@ -43,6 +43,8 @@ class AgentResult:
     escalation_reason: str | None = None
     order_created: str | None = None
     failed: bool = False
+    # True when the model asserted a fact without calling any tool this turn.
+    ungrounded: bool = False
 
 
 SYSTEM_TEMPLATE = """You are {bot_name}, the sales assistant for {business} on WhatsApp.
@@ -50,14 +52,18 @@ SYSTEM_TEMPLATE = """You are {bot_name}, the sales assistant for {business} on W
 
 HOW YOU WORK
 - You are a salesperson, not a search engine. Answer, then move the sale forward.
-- Use tools for every fact. Never state a price, size, stock level, policy or
-  delivery date you did not get from a tool. If the tools do not have it, say you
-  will check with the team and escalate.
+- GROUNDING, absolute: never state a fact about a product, price, size, stock,
+  ingredient or policy unless you called a tool THIS TURN that returned it.
+  Not from memory, not from general knowledge, not "many of our products are...".
+  If you are only asking a clarifying question, no tool is needed.
+- If a tool returns nothing relevant, say you will check with the team. Do not
+  soften a missing fact into a vague claim.
 - Exactly ONE question per message. Never stack two questions.
 - Never re-ask something you already know from the context below.
 - Keep replies under 60 words. This is WhatsApp, not email.
 - No markdown headings. A dash for lists is fine.
 - If the customer declines twice, stop pushing and be gracious.
+{greeting_rule}
 
 TAKING AN ORDER
 - Call save_order_details the moment you learn any detail; it tells you what is
@@ -154,6 +160,13 @@ async def run(
         capability_guidance=capabilities.prompt_additions(tenant),
         CLAIMS_RULES=CLAIMS_SYSTEM_RULES,
         sales_context=sales.as_prompt_block() if sales else "",
+        # Greeting every message by name reads like a mail-merge, not a person.
+        greeting_rule=(
+            "- This is their first message: greet them once, warmly, then help."
+            if not history
+            else "- You are MID-CONVERSATION. Do NOT greet again and do NOT use "
+            "their name at the start of the reply. Just continue naturally."
+        ),
     )
 
     ctx = agent_tools.ToolContext(
@@ -212,6 +225,25 @@ async def run(
             result.reply = safe or None
             result.escalation_reason = ctx.escalation_reason
             result.order_created = ctx.order_created
+
+            # Grounding watchdog. If the model asserted something without calling
+            # any tool this turn, that claim came from its own knowledge — the one
+            # failure mode grounding is supposed to prevent. A pure clarifying
+            # question is legitimate; an assertion is not.
+            if result.reply and not result.tool_calls:
+                looks_like_a_question = result.reply.rstrip().endswith("?") and (
+                    len(result.reply.split()) < 25
+                )
+                if not looks_like_a_question:
+                    result.ungrounded = True
+                    log.warning(
+                        {
+                            "event": "ungrounded_reply",
+                            "reply": result.reply[:200],
+                            "hint": "asserted a fact with no tool call this turn",
+                        }
+                    )
+
             if not result.reply:
                 result.failed = True
             return result

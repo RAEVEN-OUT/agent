@@ -15,7 +15,6 @@
     "Add every message a real customer sends that the bot gets wrong. This file",
     "is how you tell whether a threshold change improved or quietly broke things."
   ],
-
   "cases": [
     {
       "id": "greeting",
@@ -35,123 +34,210 @@
       "message": "how much is the argan oil",
       "expect_intent": "catalog_qa",
       "expect_route": "either",
-      "must_contain": ["449"],
-      "must_not": ["cure", "regrow", "guarantee"]
+      "must_contain": [
+        "449"
+      ],
+      "must_not": [
+        "cure",
+        "regrow",
+        "guarantee"
+      ],
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "price_larger_size",
       "message": "how much for the 200ml argan oil",
       "expect_intent": "catalog_qa",
       "expect_route": "either",
-      "must_contain": ["799"]
+      "must_contain": [
+        "799"
+      ],
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "delivery_charges",
       "message": "what are the delivery charges",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["599"]
+      "must_contain": [
+        "599"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "delivery_charges_paraphrase",
       "message": "how much is shipping",
       "expect_intent": "catalog_qa",
       "expect_route": "either",
-      "must_contain": ["599"]
+      "must_contain": [
+        "599"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "delivery_time",
       "message": "how long does delivery take",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["working days"]
+      "must_contain": [
+        "working days"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "cod_available",
       "message": "is cash on delivery available",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["2000"]
+      "must_contain": [
+        "2000"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "return_policy",
       "message": "what is your return policy",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["7 days"]
+      "must_contain": [
+        "7 days"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "vegan",
       "message": "are your products vegan",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["vegan"]
+      "must_contain": [
+        "vegan"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "sulphate_free",
       "message": "is it sulphate free",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["sulphate"]
+      "must_contain": [
+        "sulphate-free"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "working_hours",
       "message": "what are your working hours",
       "expect_intent": "catalog_qa",
       "expect_route": "free",
-      "must_contain": ["10am"]
+      "must_contain": [
+        "10am"
+      ],
+      "expect_tools": [
+        "get_shop_info"
+      ]
     },
     {
       "id": "stock_check",
       "message": "is the tea tree shampoo available",
       "expect_intent": "catalog_qa",
       "expect_route": "either",
-      "must_contain": ["stock"]
+      "must_contain": [
+        "stock"
+      ],
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "out_of_stock_item",
       "message": "how much is the silk finish serum",
       "expect_intent": "catalog_qa",
       "expect_route": "either",
-      "must_contain": ["out of stock"]
+      "must_contain": [
+        "out of stock"
+      ],
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "advisory_dandruff",
       "message": "which shampoo is good for dandruff",
       "expect_intent": "consultation",
       "expect_route": "llm",
-      "must_not": ["cure", "treats", "regrow", "guarantee"]
+      "must_not": [
+        "cure",
+        "treats",
+        "regrow",
+        "guarantee"
+      ],
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "advisory_open_ended",
       "message": "my hair keeps breaking, what should i use",
       "expect_intent": "consultation",
       "expect_route": "llm",
-      "must_not": ["cure", "regrow"]
+      "must_not": [
+        "cure",
+        "regrow"
+      ]
     },
     {
       "id": "order_intent",
       "message": "i want to order the tea tree shampoo",
       "expect_intent": "order_capture",
-      "expect_route": "free"
+      "expect_route": "free",
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "order_status",
       "message": "where is my order",
       "expect_intent": "order_status",
-      "expect_route": "free"
+      "expect_route": "free",
+      "expect_tools": [
+        "get_order_status"
+      ]
     },
     {
       "id": "order_status_paraphrase",
       "message": "has my parcel shipped yet",
       "expect_intent": "order_status",
-      "expect_route": "free"
+      "expect_route": "free",
+      "expect_tools": [
+        "get_order_status"
+      ]
     },
     {
       "id": "deep_link_sku",
       "message": "PRODUCT: ROSE-SHM-200",
       "expect_intent": "order_capture",
-      "expect_route": "free"
+      "expect_route": "free",
+      "expect_tools": [
+        "search_catalog"
+      ]
     },
     {
       "id": "human_request",
@@ -166,7 +252,9 @@
       "expect_intent": "adverse_reaction",
       "expect_route": "free",
       "expect_escalate": true,
-      "must_contain": ["stop using"]
+      "must_contain": [
+        "stop using"
+      ]
     },
     {
       "id": "medical_question",
@@ -174,7 +262,11 @@
       "expect_intent": "medical",
       "expect_route": "free",
       "expect_escalate": true,
-      "must_not": ["yes", "cure", "treats"]
+      "must_not": [
+        "yes",
+        "cure",
+        "treats"
+      ]
     },
     {
       "id": "pregnancy_safety",
@@ -182,7 +274,9 @@
       "expect_intent": "medical",
       "expect_route": "free",
       "expect_escalate": true,
-      "must_not": ["yes it is safe"]
+      "must_not": [
+        "yes it is safe"
+      ]
     },
     {
       "id": "complaint",
@@ -200,6 +294,50 @@
       "id": "emoji_only",
       "message": "👍",
       "expect_route": "free"
+    },
+    {
+      "id": "shorthand_stock",
+      "message": "u got argan oil",
+      "expect_tools": [
+        "search_catalog"
+      ],
+      "must_contain": [
+        "449"
+      ],
+      "must_not": [
+        "cure",
+        "regrow"
+      ]
+    },
+    {
+      "id": "ambiguous_variant",
+      "message": "i want to order ur oil",
+      "expect_tools": [
+        "search_catalog"
+      ],
+      "must_contain": [
+        "100",
+        "200"
+      ],
+      "_comment": "must ask WHICH size - silently picking one sold 2x100ml for 898"
+    },
+    {
+      "id": "shorthand_product_list",
+      "message": "u have shampoo",
+      "expect_tools": [
+        "search_catalog"
+      ],
+      "must_not": [
+        "sulphate-free"
+      ],
+      "_comment": "a stock question must not be answered with the ingredients FAQ"
+    },
+    {
+      "id": "catalog_overview",
+      "message": "wht products do u sell",
+      "expect_tools": [
+        "search_catalog"
+      ]
     }
   ]
 }

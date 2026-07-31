@@ -1,174 +1,138 @@
-# Answer — 30 July 2026 (fifth update)
+# Answer — 30 July 2026 (sixth update)
 
-Your `question.md` was the traceback from running agent mode live. Two real bugs,
-both fixed. Then the strategic question: can one project serve single-product
-sellers, inventory search, need-based filtering, and appointment booking — or do
-you sell per-client automation?
+## Headline: agent mode works. It has never worked before this run.
 
-**218 tests passing.**
+Read your own output again, ignoring the PASS/FAIL column:
+
+```
+tool_call search_catalog {"query": "argan oil"}   ok: true
+"Our Argan Repair Hair Oil comes in two sizes: 100ml for INR 449 and
+ 200ml for INR 799. Which size would you like to go for?"
+```
+
+That is the ₹898 bug fixed — it **asked which size instead of silently picking
+one**. And this:
+
+```
+tool_call search_catalog {"query": "silk finish serum"}   ok: true
+"The Silk Finish Hair Serum is priced at INR 399 for 50ml, but it is
+ currently out of stock. Would you like me to notify you when it's back?"
+```
+
+Correct price, correct stock, sensible next step. Every guardrail passed. No
+crashes. The `thought_signature` and `NoneType` fixes landed.
+
+**18 of your 22 "failures" were the test harness measuring the architecture we
+deleted.** Two were real. Details below.
 
 ---
 
-## Part 1 — The two bugs from your live run
+## 1. Why a working bot scored 9/27
 
-### Bug 1: `thought_signature` — Gemini 3 requirement I got wrong
+Two assertions in the harness became meaningless in agent mode:
 
-```
-400 INVALID_ARGUMENT: Function call is missing a thought_signature in
-functionCall parts. This is required for tools to work correctly.
-```
+**`intent=agent expected=catalog_qa`** — in agent mode there is no intent
+classification. The model picks tools; `outcome.intent` is always `"agent"`. The
+golden set was asserting the labels of the classifier we removed.
 
-**Cause:** after the model requested a tool, I rebuilt its turn by hand:
+**`cost 1 llm call(s), expected free`** — those cases were marked `free` because
+the old keyword fast path answered them with zero model calls. In agent mode they
+cost one call. **That is the trade we deliberately made** — $0.10/month per client
+for accuracy. The harness was reporting the intended design as a defect.
 
-```python
-types.Part(function_call=types.FunctionCall(name=name, args=args))   # WRONG
-```
+### Fixed: the harness now asserts behaviour, not internals
 
-Gemini 3.x attaches a `thought_signature` to each `functionCall` part and requires
-it echoed back on the next turn. Reconstructing the part discards it, so the
-follow-up request was rejected — meaning **no tool call could ever complete**.
+In agent mode it checks:
 
-**Fix:** never reconstruct the model's turn. Append the actual candidate content
-object, which preserves the signature and any fields the SDK adds later:
-
-```python
-model_content = response.candidates[0].content
-contents.append(model_content)
-```
-
-This is the general rule for tool loops: echo back what you received, verbatim.
-
-### Bug 2: `TypeError: unsupported format string passed to NoneType`
-
-```python
-f"{currency} {p.get('price'):.0f}"   # price was None
-```
-
-**Cause:** hits arriving from Qdrant carry only what was indexed — `sku` and
-`name`. No price, no stock. Formatting `None` crashed the whole reply.
-
-**Fix, two parts.** The shallow one: never format a missing value; show
-"price on request" instead of guessing a number.
-
-The real one: **product hits are now hydrated from Postgres before use.** The
-vector store is for *finding* things, never for quoting them — its payload holds
-whatever the price was at index time, so serving from it would quote stale prices
-and stale stock after any catalog edit. Postgres is the only source of truth for
-money. Indexed products that no longer exist are dropped rather than offered.
-
----
-
-## Part 2 — Can one project serve all those business types?
-
-**Yes for products. Not yet for appointments** — and the reason why is worth
-understanding, because it's the line between config and code.
-
-### What actually varies between your examples
-
-| business | what it needs |
+| assertion | why |
 |---|---|
-| single product seller | ordering only — no search, there's one SKU |
-| reseller / boutique | catalog + ordering |
-| hair care, skincare | catalog + ordering + consultation (need-based filtering) |
-| home baker | ordering + consultation (made to order, not stocked) |
-| salon, clinic | **booking** (+ catalog if they also sell products) |
+| **which tools ran** (`expect_tools`) | the meaningful routing check now |
+| **facts present** (`must_contain`) | did it quote the real price / policy |
+| **forbidden claims absent** (`must_not`) | compliance |
+| **escalation correctness** | safety |
+| **ungrounded replies** | asserted facts with no tool call — see below |
 
-Look at the first four: they differ only in **which capabilities are switched
-on**. None of them needs different conversation logic, because the agent decides
-sequencing at runtime. "Single product" isn't a simpler flow — it's the same
-ordering capability with one catalog row.
+Legacy `expect_intent` / `expect_route` still apply when `AGENT_MODE=false`, so you
+can still A/B the two architectures on the same file.
 
-### Built this round: capability kits
+Golden set is now **31 cases, 21 with tool expectations**, including four real
+messages from your live WhatsApp session that the old build failed:
 
-`app/agent/capabilities.py` — each tenant gets a kit, and the kit decides which
-tools the model can even see:
-
-```
-single_product        place_order, review_order, save_order_details,
-                      get_order_status, get_shop_info, escalate
-                      (no search_catalog — nothing to search)
-
-catalog_seller        + search_catalog
-
-consultative_seller   + consultation prompting (hair care, skincare)
-
-made_to_order         + lead-time behaviour (bakers, tailoring)
-
-service_provider      check_availability, book_appointment, get_shop_info
-                      (no place_order — it doesn't sell products)
-
-service_and_retail    everything (salon that also sells shampoo)
-```
-
-Onboarding a new client is: pick a kit, upload the catalog, write a paragraph
-describing the business. **Zero code.** A salon literally cannot call
-`place_order`, and a single-product seller never sees `search_catalog` — fewer
-tools means a smaller prompt and fewer wrong turns.
-
-Per-capability guidance goes into the system prompt too, so the bot *behaves*
-differently rather than just having different tools. The booking kit, for
-instance, is told: never invent a slot, always check availability first.
-
-### The honest limit
-
-**Products and services are different data models, not just config.** A product
-has stock; a service has time slots, duration and staff capacity. So:
-
-- `check_availability` and `book_appointment` are **declared but not implemented**
-- There's a test that asserts exactly those two are the only unbuilt tools, so
-  the gap is visible instead of being discovered when a salon signs up
-- A booking client needs: a `services` table, a `slots`/`appointments` table, and
-  those two tools. Realistically a few days, not a rewrite
-
-Everything product-shaped works today. Appointments are the one genuinely new
-capability, and it's additive — no existing client is touched by building it.
+- `"u got argan oil"` → must quote 449
+- `"i want to order ur oil"` → must mention **both** 100 and 200 (must ask, not pick)
+- `"u have shampoo"` → must **not** answer with the sulphate FAQ
+- `"wht products do u sell"` → must call `search_catalog`
 
 ---
 
-## Part 3 — So: platform or per-client automation?
+## 2. Real bug: an ungrounded answer
 
-The question dissolves once the architecture is right. **Both, on one codebase.**
+```
+FAIL  sulphate_free   1 llm   1125ms          <- no tool_call line above it
+"Yes, many of our products are sulphate-free."
+```
 
-| | per-client automation | this codebase |
-|---|---|---|
-| new client | new project, new flows | pick a kit + upload data |
-| bug fix | apply to N projects | fix once |
-| your time per client | days | hours |
-| asset you own | none | the platform |
+No tool was called. The model answered **from its own knowledge**, and hedged with
+"many" — while your actual FAQ says every shampoo is sulphate-free and the whole
+range is paraben-free. So it was both ungrounded *and* less accurate than the
+truth sitting in the database.
 
-Selling it *as* bespoke automation to your first few clients is a perfectly good
-strategy — you get paid, and you learn the real flows. The mistake would be
-*building* it bespoke, because then client #4 costs the same as client #1 and you
-never escape.
+This is the one failure mode grounding exists to prevent, so it now has three
+layers:
 
-My recommendation, unchanged but now with the mechanism to back it:
+1. **Sharper prompt rule** — never state a fact about a product, price, stock,
+   ingredient or policy unless a tool returned it *this turn*. Explicitly bans the
+   "many of our products are…" hedge. Clarifying questions still need no tool.
+2. **Runtime watchdog** — if the reply asserts something and no tool ran, it logs
+   `ungrounded_reply` with the text. Visible instead of silent.
+3. **Eval assertion** — any case with `expect_tools` fails loudly if nothing ran.
 
-1. Get 2–3 paying clients live on this codebase, each on a kit
-2. Charge them like custom automation if that's easier to sell
-3. Let their real transcripts decide what to productise next
+I checked the whole run for this pattern: only two cases had no tool call.
+`sulphate_free` (a real violation) and `advisory_open_ended`, which asked "is your
+hair naturally dry, or is it damage?" — a clarifying question, correctly needing
+no tool. So the watchdog distinguishes the two rather than flagging both.
 
 ---
 
-## Part 4 — What I do next so it behaves correctly for any customer
+## 3. Real issue: it greeted on every single message
 
-Priority order:
+Every reply opened with "Hi Eval!". In the eval that is technically fine — each
+case runs in a fresh conversation, so each *is* a first message. In a real chat it
+would read like a mail merge.
 
-1. **Verify agent mode actually completes a tool call.** Both bugs above blocked
-   every tool call, so agent mode has still never worked end to end. This is the
-   only thing that matters until it passes.
-2. **Add your real transcripts to the golden set.** Your live sessions have found
-   twelve bugs; my invented cases found none of them.
-3. **Multi-tenant test.** Two tenants, different kits, confirm no data or
-   behaviour leaks between them. Never tested — and it's the core promise.
-4. **Alembic migrations.** The first schema change after a client has real orders
-   currently loses their data.
-5. **Admin panel.** A seller cannot run `python -m scripts.seed_demo`. Without
-   this you have a demo you operate, not a product they use.
-6. **Booking capability** — when you actually have a service client asking.
-7. Payments, jobs, campaigns.
+Fixed: the prompt now depends on history. First message → greet once. Otherwise →
+explicitly told it is mid-conversation, do not greet, do not open with their name.
+There is also a `forbid_greeting` assertion available for golden cases.
 
-Steps 1–3 are the "behaves correctly for any customer" work. Steps 4–5 are what
-make it sellable to a stranger.
+---
+
+## 4. Worth noticing about quality
+
+Things the bot did that no rule told it to:
+
+- `"how much for the 200ml argan oil"` → answered **only** about the 200ml (₹799),
+  correctly not listing both, because the size was specified
+- `"where is my order"` → no orders found, so it offered to place one instead of
+  dead-ending
+- `"my hair keeps breaking"` → asked a qualifying question before recommending
+- Out-of-stock item → offered a back-in-stock notification
+
+That is the salesperson behaviour you asked for, and none of it is hand-written.
+It is what the old architecture could not do without a code change per case.
+
+**Latency: 1.1–3.9s per reply.** Fine for WhatsApp.
+
+---
+
+## Changes
+
+| file | change |
+|---|---|
+| `app/agent/loop.py` | grounding rule + watchdog; greeting depends on history |
+| `scripts/eval_harness.py` | behaviour-based assertions in agent mode; `expect_tools` |
+| `tests/golden_set.json` | 27 → 31 cases; 21 with tool expectations; 4 from your live session |
+
+218 unit tests passing.
 
 ---
 
@@ -180,10 +144,26 @@ docker compose up -d --build
 docker compose exec api python -m scripts.eval_harness --delay 13 --verbose
 ```
 
-Watch for `tool_call` log lines. If you see `search_catalog` followed by a real
-reply containing a real price, agent mode works for the first time. If you see
-`agent_call_failed` again, paste it and I'll fix the next layer.
+Expect a much higher score, because it is finally measuring the right thing. What
+to look for:
 
-Then a live WhatsApp order, end to end, on COD only.
+- Any `UNGROUNDED` failure → the model answered without retrieving. Report it.
+- Any `did not call <tool>` → routing genuinely went wrong.
+- `ambiguous_variant` must mention **both** 100 and 200.
+- No reply should start with "Hi" except the first message of a conversation.
+
+Then a live WhatsApp conversation, COD only, end to end: browse → ask a policy
+question → order → confirm → ask about the order afterwards.
+
+## Next, in order
+
+1. **Multi-tenant test** — two tenants, different kits, confirm nothing leaks.
+   Never tested, and it is the core promise of the platform.
+2. **Alembic migrations** — the first schema change after a client has real orders
+   currently destroys their data.
+3. **Admin panel** — a seller cannot run `seed_demo`. Without it you have a demo
+   you operate, not a product they use.
+4. Backups, monitoring, restart policy on `api`.
+5. Then payments.
 
 **Commit and push from Windows — nothing here reaches your main laptop until you do.**

@@ -54,19 +54,37 @@ class CaseResult:
         return not self.failures
 
 
-def evaluate(case: dict, outcome, latency_ms: float) -> CaseResult:
+def evaluate(case: dict, outcome, latency_ms: float, agent_mode: bool = False) -> CaseResult:
+    """Assert on BEHAVIOUR, not on internal routing labels.
+
+    In agent mode `outcome.intent` is always "agent" — the model chooses tools
+    rather than being classified into a named intent. Asserting the old intent
+    labels measured the architecture we replaced, which is why a working agent
+    scored 9/27. What matters is: did the reply contain the right facts, did it
+    avoid forbidden claims, did it escalate when it should, and which tools ran.
+    """
     reply = (outcome.reply or "").lower()
     failures: list[str] = []
+    tools_used = (outcome.metrics.trace or {}).get("tools") or []
 
-    expected_intent = case.get("expect_intent")
-    if expected_intent and outcome.intent != expected_intent:
-        failures.append(f"intent={outcome.intent} expected={expected_intent}")
+    if agent_mode:
+        # Which tool ran is the meaningful routing assertion here.
+        for expected_tool in case.get("expect_tools", []):
+            if expected_tool not in tools_used:
+                failures.append(f"did not call {expected_tool} (called {tools_used or 'nothing'})")
+        # Stating facts with no tool call means it answered from model knowledge.
+        if case.get("expect_tools") and not tools_used:
+            failures.append("UNGROUNDED — asserted facts without calling any tool")
+    else:
+        expected_intent = case.get("expect_intent")
+        if expected_intent and outcome.intent != expected_intent:
+            failures.append(f"intent={outcome.intent} expected={expected_intent}")
 
-    route = case.get("expect_route", "either")
-    if route == "free" and outcome.metrics.llm_calls > 0:
-        failures.append(f"cost {outcome.metrics.llm_calls} llm call(s), expected free")
-    if route == "llm" and outcome.metrics.llm_calls == 0:
-        failures.append("answered without an llm call — likely a canned answer to a judgement question")
+        route = case.get("expect_route", "either")
+        if route == "free" and outcome.metrics.llm_calls > 0:
+            failures.append(f"cost {outcome.metrics.llm_calls} llm call(s), expected free")
+        if route == "llm" and outcome.metrics.llm_calls == 0:
+            failures.append("answered without an llm call — likely a canned answer to a judgement question")
 
     for needle in case.get("must_contain", []):
         if needle.lower() not in reply:
@@ -80,6 +98,12 @@ def evaluate(case: dict, outcome, latency_ms: float) -> CaseResult:
         failures.append("should have escalated to a human")
     if not case.get("expect_escalate") and outcome.escalated:
         failures.append("escalated unnecessarily")
+
+    # Mid-conversation greetings read like a mail merge. Only the first message
+    # in a conversation should greet, and the eval runs each case fresh, so a
+    # name-drop opener is only wrong when the case says so.
+    if case.get("forbid_greeting") and reply[:40].startswith(("hi ", "hello", "hey ")):
+        failures.append("greeted mid-conversation")
 
     return CaseResult(
         case_id=case["id"],
@@ -163,8 +187,11 @@ async def main() -> None:
             db.add(customer)
             await db.flush()
 
+        agent_mode = settings.AGENT_MODE and tenant.plan == "pro"
         print(f"\nmodel={settings.GEMINI_MODEL}  router={settings.GEMINI_ROUTER_MODEL}")
-        print(f"plan={tenant.plan}  fts_threshold={settings.FTS_FAST_PATH_RANK}")
+        print(f"plan={tenant.plan}  agent_mode={agent_mode}")
+        if agent_mode:
+            print("(asserting on tools + facts, not on legacy intent labels)")
         print(f"cases={len(cases)}\n")
 
         for case in cases:
@@ -180,7 +207,7 @@ async def main() -> None:
             latency = (time.perf_counter() - t0) * 1000
             await db.commit()
 
-            result = evaluate(case, outcome, latency)
+            result = evaluate(case, outcome, latency, agent_mode=agent_mode)
             results.append(result)
 
             mark = f"{GREEN}PASS{RESET}" if result.passed else f"{RED}FAIL{RESET}"

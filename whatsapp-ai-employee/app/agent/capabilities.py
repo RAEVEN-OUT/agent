@@ -59,7 +59,10 @@ CAPABILITY_TOOLS: dict[Capability, tuple[str, ...]] = {
 }
 
 # Always available, regardless of business type.
-ALWAYS_ON = ("escalate_to_human",)
+# Available to every business type: escalation is a policy requirement, and
+# remembering who you are talking to is basic salesmanship — a browser who never
+# bought is still worth following up, but only if you know their name.
+ALWAYS_ON = ("escalate_to_human", "remember_customer")
 
 
 # Preset kits. A new client picks one and uploads their data — no code.

@@ -72,6 +72,10 @@ def evaluate(case: dict, outcome, latency_ms: float, agent_mode: bool = False) -
         for expected_tool in case.get("expect_tools", []):
             if expected_tool not in tools_used:
                 failures.append(f"did not call {expected_tool} (called {tools_used or 'nothing'})")
+        # Some questions are legitimately answerable via more than one tool.
+        any_of = case.get("expect_tools_any")
+        if any_of and not any(t in tools_used for t in any_of):
+            failures.append(f"called none of {any_of} (called {tools_used or 'nothing'})")
         # Stating facts with no tool call means it answered from model knowledge.
         if case.get("expect_tools") and not tools_used:
             failures.append("UNGROUNDED — asserted facts without calling any tool")

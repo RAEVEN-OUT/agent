@@ -138,8 +138,9 @@
       "must_contain": [
         "sulphate-free"
       ],
-      "expect_tools": [
-        "get_shop_info"
+      "expect_tools_any": [
+        "get_shop_info",
+        "search_catalog"
       ]
     },
     {

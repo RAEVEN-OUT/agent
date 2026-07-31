@@ -199,6 +199,35 @@ class Escalation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class Lead(Base):
+    """A qualified enquiry, for businesses where the bot does not close the sale.
+
+    Real estate, interiors, B2B, custom services: the bot's job is to qualify and
+    hand over, not to take payment. Success is a good lead, not an order.
+    """
+
+    __tablename__ = "leads"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), index=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id"), nullable=True
+    )
+
+    requirement: Mapped[str] = mapped_column(Text)
+    budget: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    timeline: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    contact_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # new -> contacted -> qualified -> won / lost
+    status: Mapped[str] = mapped_column(String(20), default="new")
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class UsageLog(Base):
     """Per-tenant cost metering. Needed from day one to know margin per client."""
 

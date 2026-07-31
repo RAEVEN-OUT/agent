@@ -35,9 +35,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.db.models import Conversation, Customer, Order, Tenant
+from app.db.models import Conversation, Customer, Lead, Order, Tenant
 from app.modules import hybrid_retrieval, order_capture, retrieval
-from app.services.events import ORDER_CREATED, event_bus
+from app.services.events import LEAD_CAPTURED, ORDER_CREATED, event_bus
 
 log = get_logger("agent.tools")
 
@@ -51,6 +51,7 @@ class ToolContext:
     metrics: Any
     escalation_reason: str | None = None
     order_created: str | None = None
+    lead_created: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -140,6 +141,30 @@ TOOL_SCHEMAS: list[dict] = [
             "any question about an order they already placed."
         ),
         "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "capture_enquiry",
+        "description": (
+            "Record a qualified enquiry and alert the team. Use for businesses "
+            "that quote rather than sell off a shelf. Capture what they need "
+            "plus whatever of budget, timeline and location they volunteer — do "
+            "not interrogate. Call this once you have the requirement; the team "
+            "takes it from there."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requirement": {
+                    "type": "string",
+                    "description": "What the customer is asking for, in their words",
+                },
+                "budget": {"type": "string"},
+                "timeline": {"type": "string"},
+                "contact_name": {"type": "string"},
+                "location": {"type": "string"},
+            },
+            "required": ["requirement"],
+        },
     },
     {
         "name": "escalate_to_human",
@@ -434,6 +459,52 @@ async def _get_order_status(ctx: ToolContext) -> dict:
     }
 
 
+async def _capture_enquiry(
+    ctx: ToolContext,
+    requirement: str = "",
+    budget: str = "",
+    timeline: str = "",
+    contact_name: str = "",
+    location: str = "",
+) -> dict:
+    if not requirement or len(requirement.strip()) < 3:
+        return {"saved": False, "error": "Need a description of what they want first."}
+
+    lead = Lead(
+        tenant_id=ctx.tenant.id,
+        customer_id=ctx.customer.id,
+        conversation_id=ctx.conversation.id,
+        requirement=requirement.strip()[:2000],
+        budget=(budget or None) and str(budget)[:80],
+        timeline=(timeline or None) and str(timeline)[:80],
+        contact_name=(contact_name or ctx.customer.name or None) and
+        str(contact_name or ctx.customer.name)[:120],
+        location=(location or None) and str(location)[:200],
+    )
+    ctx.db.add(lead)
+    await ctx.db.flush()
+    ctx.lead_created = str(lead.id)
+
+    await event_bus.emit(
+        LEAD_CAPTURED,
+        {
+            "tenant_id": str(ctx.tenant.id),
+            "lead_id": str(lead.id),
+            "customer_wa_id": ctx.customer.wa_id,
+            "requirement": lead.requirement[:200],
+            "budget": lead.budget,
+        },
+    )
+    return {
+        "saved": True,
+        "note": (
+            "Enquiry recorded and the team alerted. Tell the customer someone "
+            "will get back to them with details, and give a realistic timeframe "
+            "only if the shop info tool provides one."
+        ),
+    }
+
+
 async def _escalate_to_human(ctx: ToolContext, reason: str = "other", note: str = "") -> dict:
     ctx.escalation_reason = reason
     return {
@@ -449,6 +520,7 @@ IMPLEMENTATIONS = {
     "review_order": _review_order,
     "place_order": _place_order,
     "get_order_status": _get_order_status,
+    "capture_enquiry": _capture_enquiry,
     "escalate_to_human": _escalate_to_human,
 }
 

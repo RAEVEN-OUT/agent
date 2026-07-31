@@ -44,6 +44,7 @@ class Capability(str, Enum):
     BOOKING = "booking"            # appointments / slots  (needs the booking tables)
     ORDER_STATUS = "order_status"  # look up existing orders
     SHOP_INFO = "shop_info"        # policies, delivery, returns
+    ENQUIRY = "enquiry"            # qualify and hand to a human; never quote
 
 
 # Which tools each capability exposes to the model.
@@ -54,6 +55,7 @@ CAPABILITY_TOOLS: dict[Capability, tuple[str, ...]] = {
     Capability.BOOKING: ("check_availability", "book_appointment"),  # not built yet
     Capability.ORDER_STATUS: ("get_order_status",),
     Capability.SHOP_INFO: ("get_shop_info",),
+    Capability.ENQUIRY: ("capture_enquiry",),
 }
 
 # Always available, regardless of business type.
@@ -91,6 +93,10 @@ KITS: dict[str, tuple[Capability, ...]] = {
         Capability.BOOKING,
         Capability.SHOP_INFO,
     ),
+    "enquiry": (  # real estate, interiors, B2B — qualify, never quote
+        Capability.ENQUIRY,
+        Capability.SHOP_INFO,
+    ),
     "service_and_retail": (  # salon that also sells products
         Capability.BOOKING,
         Capability.CATALOG,
@@ -119,12 +125,31 @@ CAPABILITY_PROMPTS: dict[Capability, str] = {
         "You can take orders end to end. Collect details one at a time, read the "
         "summary back with the total, and only place the order after an explicit yes."
     ),
+    Capability.ENQUIRY: (
+        "This business quotes rather than sells off a shelf. You do NOT sell and "
+        "you do NOT quote prices — ever, even if asked directly. Understand what "
+        "they need, capture the enquiry, and tell them the team will follow up "
+        "with a quote."
+    ),
 }
 
 
 def kit_for(tenant) -> tuple[Capability, ...]:
-    """Capabilities for a tenant: explicit list, else its kit, else the default."""
+    """Capabilities for a tenant.
+
+    Precedence: explicit capability list > business template > named kit > default.
+    A template is the productised unit (see business_templates.py); a kit is just
+    its tool set.
+    """
     config = tenant.settings or {}
+
+    template_key = config.get("template")
+    if template_key:
+        from app.agent.business_templates import TEMPLATES
+
+        template = TEMPLATES.get(template_key)
+        if template:
+            return template.capabilities
 
     explicit = config.get("capabilities")
     if isinstance(explicit, list) and explicit:

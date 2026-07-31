@@ -18,7 +18,7 @@ description in the system prompt. No new intent patterns, no new slot logic.
 import json
 from dataclasses import dataclass, field
 
-from app.agent import capabilities
+from app.agent import business_templates, capabilities
 from app.agent import tools as agent_tools
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -58,6 +58,13 @@ HOW YOU WORK
   If you are only asking a clarifying question, no tool is needed.
 - If a tool returns nothing relevant, say you will check with the team. Do not
   soften a missing fact into a vague claim.
+- SEARCH BEFORE ASKING. If the customer names any product, category or type
+  ("oil", "shampoo", "what do you sell"), call search_catalog FIRST and show
+  what actually exists with names and prices. Only then narrow it down.
+  Never reply "yes we have a few options, what are you looking for?" — that is
+  an unhelpful claim you did not verify. Show the options, then ask.
+- Only ask a clarifying question BEFORE searching when the customer describes a
+  problem with no product mentioned at all ("my hair keeps breaking").
 - Exactly ONE question per message. Never stack two questions.
 - Never re-ask something you already know from the context below.
 - Keep replies under 60 words. This is WhatsApp, not email.
@@ -157,7 +164,13 @@ async def run(
         business=tenant_settings.get("business_name", tenant.name),
         business_description=tenant_settings.get("business_description", ""),
         tone=tenant_settings.get("tone", "warm, friendly, concise"),
-        capability_guidance=capabilities.prompt_additions(tenant),
+        capability_guidance="\n".join(
+            part for part in (
+                business_templates.for_tenant(tenant).extra_prompt,
+                capabilities.prompt_additions(tenant),
+                f"WHAT SUCCESS LOOKS LIKE: {business_templates.for_tenant(tenant).goal}",
+            ) if part
+        ),
         CLAIMS_RULES=CLAIMS_SYSTEM_RULES,
         sales_context=sales.as_prompt_block() if sales else "",
         # Greeting every message by name reads like a mail-merge, not a person.
@@ -231,10 +244,19 @@ async def run(
             # failure mode grounding is supposed to prevent. A pure clarifying
             # question is legitimate; an assertion is not.
             if result.reply and not result.tool_calls:
-                looks_like_a_question = result.reply.rstrip().endswith("?") and (
-                    len(result.reply.split()) < 25
+                # A pure clarifying question needs no tool. An existence or
+                # numeric claim does. Length is a poor proxy — look for the
+                # claim itself.
+                lowered = result.reply.lower()
+                asserts_fact = any(char.isdigit() for char in result.reply) or any(
+                    phrase in lowered
+                    for phrase in (
+                        "we have", "we offer", "we stock", "we sell", "we carry",
+                        "all our", "our products are", "our range", "we specialize",
+                        "we specialise", "is available", "are available", "in stock",
+                    )
                 )
-                if not looks_like_a_question:
+                if asserts_fact:
                     result.ungrounded = True
                     log.warning(
                         {
